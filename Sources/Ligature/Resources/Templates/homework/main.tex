@@ -1,0 +1,35 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage[margin=1in]{geometry}
+\usepackage{enumitem}
+
+\newtheorem*{problem}{Problem}
+\newenvironment{solution}{\begin{proof}[Solution]}{\end{proof}}
+\newcommand{\R}{\mathbb{R}}
+
+\title{Assignment 1}
+\author{Your Name \\ \small Course Code -- Course Name}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{problem}[1]
+Show that $\sqrt{2}$ is irrational.
+\end{problem}
+\begin{solution}
+Suppose $\sqrt{2} = p/q$ with $p, q$ coprime integers. Then $p^2 = 2q^2$, so $p$ is even; write $p = 2k$.
+Then $q^2 = 2k^2$, so $q$ is even too, contradicting coprimality.
+\end{solution}
+
+\begin{problem}[2]
+Compute $\displaystyle\int_0^1 x e^{x}\,dx$.
+\end{problem}
+\begin{solution}
+Integrating by parts with $u = x$, $dv = e^x\,dx$:
+\[
+  \int_0^1 x e^{x}\,dx = \big[x e^{x}\big]_0^1 - \int_0^1 e^{x}\,dx = e - (e - 1) = 1. \qedhere
+\]
+\end{solution}
+
+\end{document}

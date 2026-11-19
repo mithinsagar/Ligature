@@ -1,0 +1,54 @@
+\documentclass[12pt, a4paper, oneside]{report}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage[margin=1in]{geometry}
+\usepackage{setspace}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+
+\onehalfspacing
+
+\title{Title of the Thesis}
+\author{Your Name}
+\date{Month Year}
+
+\begin{document}
+
+\hypersetup{pageanchor=false}
+\begin{titlepage}
+  \centering
+  \vspace*{3cm}
+  {\Huge\bfseries Title of the Thesis\par}
+  \vspace{1.5cm}
+  {\Large Your Name\par}
+  \vfill
+  A thesis submitted in partial fulfilment of the requirements for the degree of\par
+  \textit{Bachelor of Technology}\par
+  \vspace{1cm}
+  Department of Computer Science\par
+  University Name\par
+  \vspace{1cm}
+  Month Year
+\end{titlepage}
+
+\begin{abstract}
+A one-page summary of the problem, the approach, and the results.
+\end{abstract}
+\hypersetup{pageanchor=true}
+\pagenumbering{roman}
+
+\tableofcontents
+\listoffigures
+\listoftables
+
+\clearpage
+\pagenumbering{arabic}
+\input{chapters/introduction}
+\input{chapters/background}
+\input{chapters/conclusion}
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

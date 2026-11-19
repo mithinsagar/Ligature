@@ -1,0 +1,59 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+
+\title{The Title of Your Article}
+\author{Your Name \\ \small Your Institution}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Summarise the question, what you did and what you found in three or four sentences.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+Explain why this matters. Refer to sections like this: Section~\ref{sec:method}.
+
+\section{Method}
+\label{sec:method}
+Equations are numbered automatically and can be referenced, as in Equation~\eqref{eq:energy}.
+\begin{equation}
+  E = \frac{1}{2} m v^2 + m g h
+  \label{eq:energy}
+\end{equation}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.6\linewidth]{example-image}
+  \caption{Replace this with your own figure. Drag an image into the editor to add one.}
+  \label{fig:example}
+\end{figure}
+
+\section{Results}
+Table~\ref{tab:results} shows the results.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Results}
+  \label{tab:results}
+  \begin{tabular}{lrr}
+    \toprule
+    Method   & Accuracy & Time (s) \\
+    \midrule
+    Baseline & 81.2     & 12.4     \\
+    Ours     & 87.9     & 9.1      \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Conclusion}
+What should the reader remember?
+
+\end{document}

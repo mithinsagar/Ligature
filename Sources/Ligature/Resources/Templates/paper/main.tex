@@ -1,0 +1,67 @@
+\documentclass[conference]{IEEEtran}
+\usepackage[T1]{fontenc}
+\usepackage{newtxtext, newtxmath}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{cite}
+\usepackage[hidelinks]{hyperref}
+
+\begin{document}
+
+\title{A Clear and Specific Title for Your Paper}
+
+\author{\IEEEauthorblockN{First Author}
+\IEEEauthorblockA{Department, University\\
+City, Country\\
+first.author@example.edu}
+\and
+\IEEEauthorblockN{Second Author}
+\IEEEauthorblockA{Department, University\\
+City, Country\\
+second.author@example.edu}}
+
+\maketitle
+
+\begin{abstract}
+State the problem, your approach, and the main result with a number.
+\end{abstract}
+
+\begin{IEEEkeywords}
+keyword one, keyword two, keyword three
+\end{IEEEkeywords}
+
+\section{Introduction}
+Transformers changed sequence modelling~\cite{vaswani2017attention}, building on earlier work in deep learning~\cite{lecun2015deep}.
+
+\section{Related Work}
+Position your work against what exists.
+
+\section{Method}
+Our objective is
+\begin{equation}
+  \mathcal{L}(\theta) = -\sum_{i=1}^{N} \log p_\theta(y_i \mid x_i).
+  \label{eq:loss}
+\end{equation}
+
+\section{Experiments}
+\begin{table}[htbp]
+  \caption{Main results}
+  \label{tab:main}
+  \centering
+  \begin{tabular}{lcc}
+    \toprule
+    Model & F1 & Params \\
+    \midrule
+    Baseline & 71.4 & 110M \\
+    Ours     & \textbf{76.2} & 95M \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Conclusion}
+Summarise the contribution and its limits.
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}

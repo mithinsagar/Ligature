@@ -1,0 +1,66 @@
+\documentclass[aspectratio=169, 11pt]{beamer}
+\usepackage{amsmath}
+\usepackage{booktabs}
+
+% A quiet, modern look on top of the default theme.
+\usetheme{default}
+\usecolortheme{default}
+\definecolor{ink}{HTML}{1F2328}
+\definecolor{accent}{HTML}{2F5BEA}
+\definecolor{muted}{HTML}{6E7681}
+\setbeamercolor{normal text}{fg=ink}
+\setbeamercolor{frametitle}{fg=ink}
+\setbeamercolor{title}{fg=ink}
+\setbeamercolor{structure}{fg=accent}
+\setbeamercolor{item}{fg=accent}
+\setbeamerfont{frametitle}{series=\bfseries, size=\Large}
+\setbeamerfont{title}{series=\bfseries, size=\huge}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}{\hfill\textcolor{muted}{\scriptsize\insertframenumber\,/\,\inserttotalframenumber}\hspace{1.2em}\vspace{0.8em}}
+\setbeamertemplate{itemize items}{\textbullet}
+
+\title{Your Talk Title}
+\subtitle{A short subtitle}
+\author{Your Name}
+\institute{Your Institution}
+\date{\today}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}{Outline}
+  \begin{itemize}
+    \item The problem
+    \item What we did
+    \item What we found
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{The Problem}
+  State it in one sentence. Then show why it's hard.
+  \begin{equation*}
+    \min_{\theta} \; \mathbb{E}_{(x,y)\sim\mathcal{D}} \big[\ell(f_\theta(x), y)\big]
+  \end{equation*}
+\end{frame}
+
+\begin{frame}{Results}
+  \centering
+  \begin{tabular}{lcc}
+    \toprule
+    Method & Accuracy & Speed \\
+    \midrule
+    Before & 81\% & 1.0$\times$ \\
+    After  & \textbf{88\%} & 1.7$\times$ \\
+    \bottomrule
+  \end{tabular}
+\end{frame}
+
+\begin{frame}{Thank you}
+  \centering
+  \Large Questions?
+\end{frame}
+
+\end{document}

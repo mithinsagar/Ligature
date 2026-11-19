@@ -1,0 +1,48 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.7in]{geometry}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{ink}{HTML}{1F2328}
+\definecolor{accent}{HTML}{2F5BEA}
+\definecolor{muted}{HTML}{57606A}
+\color{ink}
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\setlist{leftmargin=1.2em, itemsep=1pt, topsep=2pt}
+
+\titleformat{\section}{\large\bfseries\color{accent}}{}{0em}{}[\vspace{-0.6em}\textcolor{muted!40}{\rule{\linewidth}{0.4pt}}]
+\titlespacing*{\section}{0pt}{12pt}{6pt}
+
+\newcommand{\entry}[4]{%
+  \textbf{#1}\hfill{\color{muted}#2}\\
+  \textit{#3}\hfill{\color{muted}#4}\par\vspace{2pt}}
+
+\begin{document}
+
+{\Huge\bfseries Your Name}\par\vspace{4pt}
+{\color{muted}City, Country \;·\; you@example.com \;·\; +00 00000 00000 \;·\; \href{https://github.com/you}{github.com/you}}
+
+\section{Education}
+\entry{University Name}{2022 -- 2026}{B.Tech in Computer Science, CGPA 8.9/10}{City}
+
+\section{Experience}
+\entry{Company}{Jun 2025 -- Aug 2025}{Software Engineering Intern}{Remote}
+\begin{itemize}
+  \item Built a feature used by 20,000 people, cutting page load time by 35\%.
+  \item Wrote the tests and documentation that let the team ship it in two weeks.
+\end{itemize}
+
+\section{Projects}
+\entry{Project Name}{2026}{Swift, SwiftUI, Core ML}{\href{https://github.com/you/project}{github.com/you/project}}
+\begin{itemize}
+  \item One line on what it does and one number that shows it works.
+\end{itemize}
+
+\section{Skills}
+\textbf{Languages:} Swift, Python, C++, SQL \quad
+\textbf{Tools:} Git, Docker, Xcode, \LaTeX
+
+\end{document}

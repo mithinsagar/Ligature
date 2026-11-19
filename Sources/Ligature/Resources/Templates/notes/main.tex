@@ -1,0 +1,43 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage[margin=1in]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{accent}{HTML}{2F5BEA}
+\newtcbtheorem[number within=section]{theorem}{Theorem}%
+  {colback=accent!4, colframe=accent!70, fonttitle=\bfseries, boxrule=0.5pt, arc=2pt}{thm}
+\newtcbtheorem[use counter from=theorem]{definition}{Definition}%
+  {colback=black!2, colframe=black!40, fonttitle=\bfseries, boxrule=0.5pt, arc=2pt}{def}
+\theoremstyle{remark}
+\newtheorem*{example}{Example}
+
+\title{Linear Algebra --- Lecture 1}
+\author{Your Name}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\section{Vector spaces}
+
+\begin{definition}{Vector space}{vs}
+A \emph{vector space} over a field $F$ is a set $V$ with addition and scalar multiplication satisfying the usual axioms.
+\end{definition}
+
+\begin{example}
+$\mathbb{R}^n$ with componentwise operations is a vector space over $\mathbb{R}$.
+\end{example}
+
+\begin{theorem}{Rank--nullity}{rank}
+For a linear map $T \colon V \to W$ with $V$ finite-dimensional,
+\[
+  \dim V = \operatorname{rank} T + \operatorname{nullity} T.
+\]
+\end{theorem}
+
+See Theorem~\ref{thm:rank}.
+
+\end{document}
