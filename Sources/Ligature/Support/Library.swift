@@ -44,7 +44,7 @@ final class Recents {
         items.insert(RecentProject(path: url.path, mainFile: main, opened: Date()), at: 0)
         if items.count > 20 { items.removeLast(items.count - 20) }
         save()
-        NSDocumentController.shared.noteNewRecentDocumentURL(url)
+        if !Recents.testRun { NSDocumentController.shared.noteNewRecentDocumentURL(url) }
     }
 
     func remove(_ item: RecentProject) {
@@ -52,7 +52,11 @@ final class Recents {
         save()
     }
 
+    /// Scripted test runs read the real list but never write to it, so test projects don't show up in it.
+    private static let testRun = ProcessInfo.processInfo.environment["LIGATURE_SCRIPT"] != nil
+
     private func save() {
+        guard !Recents.testRun else { return }
         if let data = try? JSONEncoder().encode(items) { UserDefaults.standard.set(data, forKey: key) }
     }
 }
@@ -155,12 +159,23 @@ enum HistoryStore {
         try? data.write(to: dir.appendingPathComponent(stamp + ".json"), options: .atomic)
         let all = ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []).filter { $0.pathExtension == "json" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
         if all.count > 300 {
-            for old in all.prefix(all.count - 300) {
+            // Labelled versions are kept forever; the oldest unlabelled ones go.
+            let unlabelled = all.filter { ((try? JSONDecoder().decode(Snapshot.self, from: Data(contentsOf: $0)))?.note ?? "").isEmpty }
+            for old in unlabelled.prefix(max(0, all.count - 300)) {
                 try? FileManager.default.removeItem(at: old)
                 try? FileManager.default.removeItem(at: old.deletingPathExtension().appendingPathExtension("pdf"))
             }
         }
         return snap
+    }
+
+    /// Names a version (or clears its name with nil).
+    static func setLabel(_ label: String?, on snap: Snapshot, root: URL) -> Snapshot? {
+        let url = directory(for: root).appendingPathComponent(String(format: "%.3f", snap.date.timeIntervalSince1970) + ".json")
+        var s = snap
+        s.note = label?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? label : nil
+        guard let data = try? JSONEncoder().encode(s), (try? data.write(to: url, options: .atomic)) != nil else { return nil }
+        return s
     }
 }
 
@@ -169,7 +184,7 @@ enum HistoryStore {
 /// Every PDF or zip the user downloads from a project, with a private copy so it can be opened or saved
 /// again later even if the original was moved or deleted. Kept per project, newest 60.
 struct DownloadRecord: Codable, Identifiable, Hashable {
-    enum Kind: String, Codable { case pdf, source, arxiv, word }
+    enum Kind: String, Codable { case pdf, source, arxiv, word, markdown, html }
     var id = UUID()
     var date: Date
     var kind: Kind
@@ -238,16 +253,27 @@ enum WordExporter {
             .first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
 
-    static func export(root: URL, main: String, bibFiles: [String], to dest: URL) throws {
+    /// What pandoc writes: Word, Markdown, or a self-contained web page (images embedded, maths as MathML so
+    /// it shows offline).
+    enum Format: String { case docx, markdown, html
+        var title: String { ["docx": "Word", "markdown": "Markdown", "html": "Web page"][rawValue]! }
+    }
+
+    static func export(root: URL, main: String, bibFiles: [String], to dest: URL, format: Format = .docx) throws {
         guard let pandoc = pandoc() else {
-            throw NSError(domain: "Ligature", code: 10, userInfo: [NSLocalizedDescriptionKey: "Word export needs pandoc. Install it with: brew install pandoc"])
+            throw NSError(domain: "Ligature", code: 10, userInfo: [NSLocalizedDescriptionKey: "\(format.title) export needs pandoc. Install it with: brew install pandoc"])
         }
         let mainURL = root.appendingPathComponent(main)
         let p = Process()
         p.executableURL = pandoc
         p.currentDirectoryURL = mainURL.deletingLastPathComponent()
-        var args = [mainURL.lastPathComponent, "--from=latex", "--to=docx", "--output=\(dest.path)",
+        var args = [mainURL.lastPathComponent, "--from=latex", "--to=\(format == .markdown ? "markdown" : format.rawValue)", "--output=\(dest.path)",
                     "--resource-path=\(mainURL.deletingLastPathComponent().path):\(root.path)"]
+        switch format {
+        case .html: args += ["--standalone", "--embed-resources", "--mathml", "--metadata=pagetitle:\(mainURL.deletingPathExtension().lastPathComponent)"]
+        case .markdown: args += ["--wrap=none", "--standalone"]
+        case .docx: break
+        }
         if !bibFiles.isEmpty {
             args.append("--citeproc")
             args += bibFiles.map { "--bibliography=\(root.appendingPathComponent($0).path)" }

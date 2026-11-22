@@ -45,6 +45,11 @@ struct WorkspaceView: View {
             }
         }
         .toolbar { WorkspaceToolbar(model: model) }
+        .toolbar(model.focusMode ? .hidden : .automatic, for: .windowToolbar)
+        .overlay(alignment: .top) { if model.focusMode { FocusExitBar(model: model) } }
+        .onChange(of: model.focusMode) { _, on in
+            withAnimation(.panel) { columnVisibility = on ? .detailOnly : (model.showSidebar ? .all : .detailOnly) }
+        }
         .overlay {
             if model.showPalette {
                 CommandPalette(model: model)
@@ -57,6 +62,7 @@ struct WorkspaceView: View {
             TableBuilderSheet(model: model, initial: box.table)
         }
         .sheet(isPresented: $model.showCitationSheet) { AddCitationSheet(model: model) }
+        .sheet(item: $model.errorAssistIssue) { issue in ErrorAssistSheet(model: model, issue: issue) }
         .sheet(isPresented: $model.showFigureSheet) { FigureSheet(model: model) }
         .sheet(isPresented: $model.showNewFile) { NewFileSheet(model: model) }
         .sheet(isPresented: $model.showDownloads) { DownloadsSheet(model: model) }
@@ -66,7 +72,7 @@ struct WorkspaceView: View {
         .focusedSceneValue(\.project, model)
         .preferredColorScheme(Preferences.shared.themeID == "auto" ? nil : (theme.isDark ? .dark : .light))
         .tint(accent)
-        .onChange(of: columnVisibility) { _, v in model.showSidebar = v != .detailOnly }
+        .onChange(of: columnVisibility) { _, v in if !model.focusMode { model.showSidebar = v != .detailOnly } }
         .onChange(of: model.showSidebar) { _, show in
             withAnimation(.panel) { columnVisibility = show ? .all : .detailOnly }
         }
@@ -119,14 +125,46 @@ struct WorkspaceView: View {
                         .zIndex(2)
                 }
                 if model.layout != .editor {
-                    PDFPane(model: model)
-                        .frame(maxWidth: .infinity)
-                        .clipped()
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                    Group {
+                        if model.pdfDetached {
+                            VStack(spacing: 10) {
+                                EmptyState(symbol: "macwindow.on.rectangle", title: "The PDF is in its own window", message: "Close that window to bring it back here.")
+                                    .frame(height: 130)
+                            }
+                        } else {
+                            PDFPane(model: model)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .clipped()
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }
             .animation(.panel, value: model.layout)
         }
+    }
+}
+
+/// In Focus mode: a thin bar that appears when the pointer reaches the top, to leave Focus mode.
+private struct FocusExitBar: View {
+    let model: ProjectModel
+    @State private var hovering = false
+    var body: some View {
+        ZStack(alignment: .top) {
+            Color.clear.frame(height: 34).contentShape(Rectangle())
+            if hovering {
+                Button { withAnimation(.panel) { model.focusMode = false } } label: {
+                    Label("Leave Focus Mode  ⌥⌘↩", systemImage: "arrow.down.right.and.arrow.up.left")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                }
+                .buttonStyle(.plain)
+                .glassEffect(.regular.interactive(), in: Capsule())
+                .padding(.top, 6)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .onHover { h in withAnimation(.hover) { hovering = h } }
     }
 }
 
@@ -142,7 +180,7 @@ struct EditorColumn: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            EditorTabs(model: model)
+            if !model.focusMode { EditorTabs(model: model) }
             ZStack {
                 EditorView(model: model)
                 if model.activeDoc == nil {
@@ -150,7 +188,7 @@ struct EditorColumn: View {
                     EmptyState(symbol: "doc.text", title: "No file open", message: "Choose a file in the sidebar, or press ⌘P to open one quickly.")
                 }
             }
-            StatusBar(model: model)
+            if !model.focusMode { StatusBar(model: model) }
         }
         .background(Color(theme.editor))
     }
@@ -421,6 +459,13 @@ struct StatusBar: View {
 
     var body: some View {
         HStack(spacing: 4) {
+            if let vim = model.vimMode {
+                Text("-- \(vim) --")
+                    .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                    .foregroundStyle(vim == "INSERT" ? Color(theme.secondary) : accent)
+                    .padding(.horizontal, 6)
+                    .help("Vim keybindings (turn off in Settings › Editor)")
+            }
             StatusItem(text: "Ln \(model.caretLine), Col \(model.caretColumn)", symbol: nil, help: "Go to line  ⌘L") { model.showPalette = true; PaletteSeed.shared.text = ":" }
             StatusItem(text: "\(model.words.formatted()) words", symbol: "text.word.spacing", help: "Words of prose in the document (commands, math and comments excluded)") {}
             if let s = model.currentSection {

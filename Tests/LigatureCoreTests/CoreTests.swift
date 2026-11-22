@@ -26,6 +26,15 @@ final class CoreTests: XCTestCase {
         XCTAssertTrue(ErrorAdvisor.advise(errors[1])!.title.contains("itemize"))
     }
 
+    func testStderrNamesInputFilesWithoutExtension() {
+        // \input{sections/results} makes Tectonic report "sections/results:18:", not "sections/results.tex:18:".
+        let stderr = "error: sections/results:18: Undefined control sequence\nerror: halted on potentially-recoverable error as specified"
+        let issues = LogParser.parse(stderr: stderr, log: nil, mainFile: "main.tex")
+        XCTAssertEqual(issues.count, 1)
+        XCTAssertEqual(issues.first?.file, "sections/results.tex")
+        XCTAssertEqual(issues.first?.line, 18)
+    }
+
     func testPackageAdvice() {
         let issue = CompileIssue(severity: .error, file: "main.tex", line: 4, message: "Undefined control sequence", context: "$\\mathbb")
         let a = ErrorAdvisor.advise(issue)
@@ -166,4 +175,80 @@ final class CoreTests: XCTestCase {
         XCTAssertTrue(Catalog.environments.contains { $0.name == "align" && $0.body.contains("\\\\\n") })
         XCTAssertGreaterThan(Catalog.symbols.count, 150)
     }
+
+    func testLinter() {
+        func msgs(_ t: String, _ ctx: Linter.Context = Linter.Context()) -> [String] { Linter.check(t, context: ctx).map(\.message) }
+        // Clean document: nothing.
+        let clean = "\\documentclass{article}\n\\begin{document}\nHello $x^2$ and \\[ y \\] done.\n\\begin{itemize}\n\\item a\n\\end{itemize}\n\\end{document}\n"
+        XCTAssertEqual(msgs(clean), [])
+        // Braces.
+        XCTAssertEqual(msgs("a } b").first, "Extra } with no matching {")
+        XCTAssertEqual(msgs("\\textbf{open").first, "This { is never closed")
+        // Environments.
+        let mismatch = Linter.check("\\begin{itemize}\n\\item x\n\\end{enumerate}\n")
+        XCTAssertTrue(mismatch.contains { $0.message.contains("doesn't match \\begin{itemize}") && $0.line == 3 })
+        XCTAssertTrue(msgs("\\begin{figure}\nx\n").contains("\\begin{figure} is never closed"))
+        XCTAssertTrue(msgs("x\n\\end{table}").contains("\\end{table} with no matching \\begin{table}"))
+        // Maths.
+        let dollar = Linter.check("Let $x be\n\nnext")
+        XCTAssertEqual(dollar.first?.message, "Unclosed $: the maths starting here never ends")
+        XCTAssertEqual(dollar.first?.column, 5)
+        XCTAssertTrue(msgs("\\[ a \\left( b \\]").contains("\\left without a matching \\right"))
+        XCTAssertTrue(msgs("\\begin{equation} a \\right) \\end{equation}").contains("\\right without a matching \\left"))
+        // Comments and verbatim are ignored.
+        XCTAssertEqual(msgs("% $ { \\begin{x}\n\\begin{verbatim}\n$ } \\end{foo}\n\\end{verbatim}\n"), [])
+        // References and citations.
+        let ctx = Linter.Context(labels: ["fig:a"], citations: ["knuth"])
+        XCTAssertEqual(msgs("See \\ref{fig:a} and \\ref{fig:b}, \\cite{knuth, lamport}.", ctx), ["No \\label{fig:b} anywhere in the project", "lamport isn't in your bibliography"])
+        let cite = Linter.check("x \\cite{knuth, lamport}", context: ctx)
+        XCTAssertEqual(cite.first?.column, 16)
+        // Packages (plain classes only).
+        let pkgCtx = Linter.Context(packages: ["amsmath"], documentClass: "article")
+        XCTAssertEqual(msgs("\\includegraphics{a} \\includegraphics{b} \\mathbb{R}", pkgCtx), ["\\includegraphics needs \\usepackage{graphicx}", "\\mathbb needs \\usepackage{amssymb}"])
+        XCTAssertEqual(msgs("\\includegraphics{a}", Linter.Context(packages: [], documentClass: "beamer")), [])
+        let info = Linter.preambleInfo("\\documentclass[11pt]{article}\n\\usepackage[utf8]{inputenc}\n\\usepackage{amsmath,graphicx}\n\\begin{document}\n\\usepackage{late}")
+        XCTAssertEqual(info.documentClass, "article")
+        XCTAssertEqual(info.packages, ["inputenc", "amsmath", "graphicx"])
+    }
+
+    func testFolding() {
+        let t = "\\documentclass{article}\n\\usepackage{x}\n\\begin{document}\n\\section{A}\ntext\n\\begin{figure}\nimg\n\\end{figure}\n\n\\subsection{B}\nmore\n\\section{C}\nend\n\\end{document}"
+        let r = Folding.regions(in: t)
+        let byStart = Dictionary(uniqueKeysWithValues: r.map { ($0.startLine, $0) })
+        XCTAssertEqual(byStart[1]?.endLine, 2)            // preamble
+        XCTAssertEqual(byStart[4]?.endLine, 11)           // \section{A} up to before \section{C}
+        XCTAssertEqual(byStart[6]?.endLine, 8)            // figure
+        XCTAssertEqual(byStart[10]?.endLine, 11)          // \subsection{B}
+        XCTAssertEqual(byStart[12]?.endLine, 13)          // \section{C} stops before \end{document}
+        let ns = t as NSString
+        XCTAssertEqual(ns.substring(with: byStart[6]!.range), "\nimg\n\\end{figure}")
+    }
+
+    func testPlainText() {
+        XCTAssertEqual(LaTeXText.plainText("A \\textbf{bold} \\emph{claim}~\\cite{k} --- see Fig.~\\ref{fig:a}\\label{x}."), "A bold claim [k] — see Fig. [fig:a].")
+        XCTAssertEqual(LaTeXText.argument(of: "caption", in: "\\caption[short]{Long {nested} caption}"), "Long {nested} caption")
+        XCTAssertEqual(LaTeXText.argument(of: "title", in: "\\title{A \\textbf{B}}"), "A \\textbf{B}")
+    }
+
+
+    func testProjectSearch() {
+        let t = "Alpha beta\nalphabet ALPHA\n\\section{Alpha}"
+        XCTAssertEqual(ProjectSearch.find("alpha", in: t, file: "a.tex", options: .init()).map(\.line), [1, 2, 2, 3])
+        XCTAssertEqual(ProjectSearch.find("alpha", in: t, file: "a.tex", options: .init(wholeWord: true)).count, 3)
+        XCTAssertEqual(ProjectSearch.find("Alpha", in: t, file: "a.tex", options: .init(caseSensitive: true)).count, 2)
+        let m = ProjectSearch.find("ALPHA", in: t, file: "a.tex", options: .init(caseSensitive: true)).first!
+        XCTAssertEqual(m.lineText, "alphabet ALPHA")
+        XCTAssertEqual(m.rangeInLine, NSRange(location: 9, length: 5))
+        XCTAssertEqual(ProjectSearch.find(#"\\section\{(\w+)\}"#, in: t, file: "a.tex", options: .init(regex: true)).first?.line, 3)
+        XCTAssertTrue(ProjectSearch.find("(", in: t, file: "a.tex", options: .init(regex: true)).isEmpty)   // invalid regex: nothing, no crash
+        let r = ProjectSearch.replace(#"\\section\{(\w+)\}"#, with: #"\\section*{$1}"#, in: t, options: .init(regex: true))
+        XCTAssertEqual(r.count, 1)
+        XCTAssertTrue(r.text.hasSuffix("\\section*{Alpha}"))
+        let plain = ProjectSearch.replace("alpha", with: "$x", in: t, options: .init(wholeWord: true))
+        XCTAssertEqual(plain.count, 3)
+        XCTAssertTrue(plain.text.hasPrefix("$x beta"))
+        let one = ProjectSearch.find("alpha", in: t, file: "a.tex", options: .init())[1]
+        XCTAssertEqual(ProjectSearch.replace("alpha", with: "Z", in: t, options: .init(), only: [one.range]).text, "Alpha beta\nZbet ALPHA\n\\section{Alpha}")
+    }
+
 }

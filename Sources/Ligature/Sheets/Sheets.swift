@@ -274,6 +274,9 @@ struct FigureSheet: View {
 
 struct AddCitationSheet: View {
     let model: ProjectModel
+    @State private var source: Source = .web
+    @State private var zoteroReady: Bool?
+    @State private var zoteroHits: [Zotero.Item] = []
     @State private var input = ""
     @State private var results: [CitationFetcher.SearchHit] = []
     @State private var bibtex = ""
@@ -291,9 +294,113 @@ struct AddCitationSheet: View {
         }
     }
 
+    enum Source: Hashable { case web, zotero }
+
     var body: some View {
-        SheetScaffold(title: "Add Citation", subtitle: "Paste a DOI or arXiv ID, or search by title. Uses Crossref and arXiv.", symbol: "quote.opening") {
+        SheetScaffold(title: "Add Citation", subtitle: source == .web ? "Paste a DOI or arXiv ID, or search by title. Uses Crossref and arXiv." : "Search your Zotero library on this Mac (Better BibTeX).", symbol: "quote.opening") {
             VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 6) {
+                    Button { withAnimation(.panel) { source = .web; results = []; bibtex = "" } } label: { Label("DOI, arXiv, Title", systemImage: "globe") }.buttonStyle(.ligChip(selected: source == .web))
+                    Button { withAnimation(.panel) { source = .zotero; bibtex = "" }; checkZotero() } label: { Label("Zotero", systemImage: "books.vertical") }.buttonStyle(.ligChip(selected: source == .zotero))
+                    Spacer()
+                }
+                if source == .zotero { zoteroBody } else { webBody }
+            }
+            .padding(18)
+        } footer: {
+            if !bibtex.isEmpty { Button("Back") { bibtex = "" }.buttonStyle(.ligSecondary) }
+            Spacer()
+            Button("Cancel") { dismiss() }.buttonStyle(.ligSecondary).keyboardShortcut(.cancelAction)
+            Button("Add to Bibliography") { add() }.buttonStyle(.ligPrimary).keyboardShortcut(.defaultAction).disabled(bibtex.isEmpty)
+        }
+        .frame(width: 600)
+        .onAppear { focused = true }
+    }
+
+    @ViewBuilder var zoteroBody: some View {
+        switch zoteroReady {
+        case nil:
+            HStack { ProgressView().controlSize(.small); Text("Looking for Zotero…").font(.system(size: 12)).foregroundStyle(Color(theme.secondary)) }
+        case false?:
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Zotero isn't open, or Better BibTeX isn't installed.", systemImage: "exclamationmark.triangle").font(.system(size: 12.5, weight: .medium)).foregroundStyle(Color(theme.warning))
+                Text("Open Zotero on this Mac with the free Better BibTeX add-on, then try again. Ligature only talks to Zotero locally.")
+                    .font(.system(size: 12)).foregroundStyle(Color(theme.secondary)).fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("Get Better BibTeX") { NSWorkspace.shared.open(URL(string: "https://retorque.re/zotero-better-bibtex/installation/")!) }.buttonStyle(.ligSecondary)
+                    Button("Try Again") { checkZotero() }.buttonStyle(.ligSecondary)
+                }
+            }
+        case true?:
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    SearchField(text: $input, prompt: "Title, author, year or citation key").focused($focused).onSubmit { searchZotero() }
+                    Button("Search") { searchZotero() }.buttonStyle(.ligPrimary).disabled(input.trimmingCharacters(in: .whitespaces).isEmpty || loading)
+                }
+                if loading { HStack { ProgressView().controlSize(.small); Text("Searching your library…").font(.system(size: 12)).foregroundStyle(Color(theme.secondary)) } }
+                if let error { Label(error, systemImage: "exclamationmark.triangle").font(.system(size: 12)).foregroundStyle(Color(theme.warning)) }
+                if !zoteroHits.isEmpty && bibtex.isEmpty {
+                    ScrollView {
+                        VStack(spacing: 3) {
+                            ForEach(zoteroHits) { hit in
+                                HStack(alignment: .top) {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(hit.title).font(.system(size: 12.5, weight: .medium)).foregroundStyle(Color(theme.text)).lineLimit(2)
+                                        Text([hit.authors, hit.year].filter { !$0.isEmpty }.joined(separator: " · ")).font(.system(size: 11)).foregroundStyle(Color(theme.secondary)).lineLimit(1)
+                                    }
+                                    Spacer()
+                                    Text(hit.citekey).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Color(theme.reference))
+                                }
+                                .padding(9).frame(maxWidth: .infinity, alignment: .leading)
+                                .hoverRow()
+                                .onTapGesture { exportZotero(hit.citekey) }
+                            }
+                        }
+                    }
+                    .frame(height: 230)
+                }
+                if !bibtex.isEmpty { bibtexEditor }
+            }
+        }
+    }
+
+    var bibtexEditor: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextEditor(text: $bibtex)
+                .font(.system(size: 11.5, design: .monospaced))
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color(theme.editor)))
+                .frame(height: 210)
+            Toggle("Insert \\cite{…} at the caret", isOn: $insertCite).toggleStyle(.lig).font(.system(size: 12))
+        }
+    }
+
+    func checkZotero() {
+        zoteroReady = nil
+        Task { let ok = await Zotero.isReady(); withAnimation(.panel) { zoteroReady = ok } }
+    }
+
+    func searchZotero() {
+        error = nil; zoteroHits = []; loading = true
+        let q = input
+        Task {
+            do { zoteroHits = try await Zotero.search(q); if zoteroHits.isEmpty { error = "Nothing in your library matches “\(q)”." } }
+            catch { self.error = error.localizedDescription }
+            loading = false
+        }
+    }
+
+    func exportZotero(_ key: String) {
+        loading = true; error = nil
+        Task {
+            do { bibtex = try await Zotero.bibtex([key]).trimmingCharacters(in: .whitespacesAndNewlines) + "\n" }
+            catch { self.error = error.localizedDescription }
+            loading = false
+        }
+    }
+
+    @ViewBuilder var webBody: some View {
                 HStack(spacing: 8) {
                     SearchField(text: $input, prompt: "10.1038/nature14539  ·  1706.03762  ·  attention is all you need")
                         .focused($focused)
@@ -319,25 +426,7 @@ struct AddCitationSheet: View {
                     }
                     .frame(height: 230)
                 }
-                if !bibtex.isEmpty {
-                    TextEditor(text: $bibtex)
-                        .font(.system(size: 11.5, design: .monospaced))
-                        .scrollContentBackground(.hidden)
-                        .padding(8)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Color(theme.editor)))
-                        .frame(height: 210)
-                    Toggle("Insert \\cite{…} at the caret", isOn: $insertCite).toggleStyle(.lig).font(.system(size: 12))
-                }
-            }
-            .padding(18)
-        } footer: {
-            if !bibtex.isEmpty { Button("Back") { bibtex = "" }.buttonStyle(.ligSecondary) }
-            Spacer()
-            Button("Cancel") { dismiss() }.buttonStyle(.ligSecondary).keyboardShortcut(.cancelAction)
-            Button("Add to Bibliography") { add() }.buttonStyle(.ligPrimary).keyboardShortcut(.defaultAction).disabled(bibtex.isEmpty)
-        }
-        .frame(width: 600)
-        .onAppear { focused = true }
+                if !bibtex.isEmpty { bibtexEditor }
     }
 
     func lookUp() {
@@ -529,7 +618,7 @@ private struct DownloadRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: record.kind == .pdf ? "doc.richtext.fill" : (record.kind == .word ? "doc.text.fill" : "doc.zipper"))
+            Image(systemName: record.kind == .pdf ? "doc.richtext.fill" : (record.kind == .word ? "doc.text.fill" : (record.kind == .html ? "globe" : (record.kind == .markdown ? "text.alignleft" : "doc.zipper"))))
                 .font(.system(size: 15))
                 .foregroundStyle(record.kind == .pdf ? Color(theme.error).opacity(0.85) : (record.kind == .word ? Color(Theme.hex(0x2B579A)) : accent))
                 .frame(width: 34, height: 34)

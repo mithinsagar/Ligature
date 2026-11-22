@@ -23,6 +23,8 @@ final class TextDocument: NSObject, NSTextStorageDelegate, Identifiable {
     private(set) var undoDepth = 0
     private(set) var redoDepth = 0
     private var observers: [NSObjectProtocol] = []
+    /// The project this file belongs to (Visual mode needs it to find figures and the preamble).
+    weak var project: ProjectModel?
 
     var name: String { url.lastPathComponent }
     var kind: Kind { Kind(url.pathExtension) }
@@ -98,7 +100,7 @@ final class TextDocument: NSObject, NSTextStorageDelegate, Identifiable {
         storage.endEditing()
         applyingExternal = false
         savedText = disk
-        Highlighter.highlightAll(storage, kind: kind)
+        Highlighter.highlightAll(storage, kind: kind, project: project)
         return true
     }
 
@@ -122,14 +124,14 @@ final class TextDocument: NSObject, NSTextStorageDelegate, Identifiable {
         storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: savedText)
         storage.endEditing()
         applyingExternal = false
-        Highlighter.highlightAll(storage, kind: kind)
+        Highlighter.highlightAll(storage, kind: kind, project: project)
     }
 
     func rehighlight() {
         storage.beginEditing()
         storage.addAttributes(Highlighter.baseAttributes(), range: NSRange(location: 0, length: storage.length))
         storage.endEditing()
-        Highlighter.highlightAll(storage, kind: kind)
+        Highlighter.highlightAll(storage, kind: kind, project: project)
     }
 
     // MARK: NSTextStorageDelegate
@@ -137,7 +139,9 @@ final class TextDocument: NSObject, NSTextStorageDelegate, Identifiable {
     nonisolated func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions, range editedRange: NSRange, changeInLength delta: Int) {
         guard editedMask.contains(.editedCharacters) else { return }
         MainActor.assumeIsolated {
-            Highlighter.highlightEdited(textStorage, range: editedRange, kind: kind)
+            FoldStore.adjust(textStorage, edited: editedRange, delta: delta)
+            CommentAnchors.adjust(textStorage, edited: editedRange, delta: delta)
+            Highlighter.highlightEdited(textStorage, range: editedRange, kind: kind, project: project)
             if !applyingExternal { onChange?(self) }
         }
     }

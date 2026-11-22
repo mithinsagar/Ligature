@@ -17,10 +17,10 @@ struct EditorView: NSViewRepresentable {
         let c = context.coordinator.controller
         // Reading these registers observation, so theme/prefs/document changes re-run this.
         let prefs = Preferences.shared
-        let signature = "\(ThemeManager.shared.theme.id)|\(ThemeManager.shared.accentNS)|\(prefs.editorFontSize)|\(prefs.lineSpacing)|\(prefs.wrapLines)|\(prefs.lineNumbers)|\(prefs.spellCheck)|\(prefs.visualMode)"
+        let signature = "\(ThemeManager.shared.theme.id)|\(ThemeManager.shared.accentNS)|\(prefs.editorFontSize)|\(prefs.lineSpacing)|\(prefs.wrapLines)|\(prefs.lineNumbers)|\(prefs.spellCheck)|\(prefs.visualMode)|\(prefs.editorFontName)|\(prefs.keybindings)|\(prefs.spellLanguage)|\(prefs.grammarCheck)"
         c?.attach(model.activeDoc)
         c?.applySettings(signature: signature)
-        c?.setIssues(model.issues)
+        c?.setIssues(model.issues, live: model.liveIssues)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -48,6 +48,8 @@ final class EditorController: NSObject, NSTextViewDelegate, LaTeXTextViewDelegat
     private var peekToken: String?
 
     private let mathPanel = FloatingPanel()
+    private let selectionPanel = FloatingPanel()
+    private var selectionTask: Task<Void, Never>?
     private var mathTask: Task<Void, Never>?
     private var mathKey: String?
 
@@ -85,6 +87,124 @@ final class EditorController: NSObject, NSTextViewDelegate, LaTeXTextViewDelegat
                 if let d = self?.document { d.scrollY = self?.scrollView.contentView.bounds.origin.y ?? 0 }
             }
         }
+        // Equations typeset in the background appear as soon as they're ready.
+        NotificationCenter.default.addObserver(forName: .visualMathReady, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshVisual() }
+        }
+        ruler.isFolded = { [weak self] r in
+            guard let s = self?.document?.storage else { return false }
+            return MainActor.assumeIsolated { FoldStore.isFolded(r, in: s) }
+        }
+        ruler.onToggleFold = { [weak self] r in MainActor.assumeIsolated { self?.toggleFold(r) } }
+        textView.commentRanges = { [weak self] storage in
+            guard let self else { return [] }
+            return MainActor.assumeIsolated {
+                let anchors = CommentAnchors.all(storage)
+                return self.model.comments.compactMap { c in anchors[c.id].map { ($0, self.model.focusedComment == c.id, c.resolved) } }
+            }
+        }
+        textView.onColumnWidthChange = { [weak self] w in
+            MainActor.assumeIsolated {
+                guard abs(Highlighter.columnWidth - w) > 24 else { return }
+                Highlighter.columnWidth = w
+                self?.refreshVisualSoon()
+            }
+        }
+    }
+
+    // MARK: Folding
+
+    private var foldTask: Task<Void, Never>?
+
+    /// Recomputes where the code can fold (debounced while typing).
+    func updateFoldRegions(now: Bool = false) {
+        foldTask?.cancel()
+        guard let doc = document, doc.kind == .tex else { ruler.foldRegions = [:]; return }
+        let work = { [weak self] in
+            guard let self, let doc = self.document else { return }
+            let regions = Folding.regions(in: doc.text)
+            self.ruler.foldRegions = Dictionary(regions.map { ($0.startLine, $0.range) }, uniquingKeysWith: { a, _ in a })
+        }
+        if now { work(); return }
+        foldTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            work()
+        }
+    }
+
+    func toggleFold(_ r: NSRange) {
+        guard let doc = document, NSMaxRange(r) <= doc.storage.length else { return }
+        if FoldStore.isFolded(r, in: doc.storage) {
+            FoldStore.unfold(r, in: doc.storage)
+        } else {
+            // Keep the caret out of what's about to disappear.
+            let sel = textView.selectedRange().location
+            if sel > r.location && sel <= NSMaxRange(r) { textView.setSelectedRange(NSRange(location: r.location, length: 0)) }
+            FoldStore.fold(r, in: doc.storage)
+        }
+        doc.rehighlight()
+        ruler.needsDisplay = true
+    }
+
+    enum FoldAction { case foldHere, unfoldHere, foldAll, unfoldAll }
+
+    func fold(_ action: FoldAction) {
+        guard let doc = document, doc.kind == .tex, !Preferences.shared.visualMode else { return }
+        updateFoldRegions(now: true)
+        let regions = Folding.regions(in: doc.text)
+        let caret = ruler.line(forCharacter: textView.selectedRange().location)
+        switch action {
+        case .foldHere:
+            // The innermost region around the caret that isn't folded yet.
+            if let r = regions.filter({ $0.startLine <= caret && caret <= $0.endLine && !FoldStore.isFolded($0.range, in: doc.storage) })
+                .min(by: { $0.endLine - $0.startLine < $1.endLine - $1.startLine }) { toggleFold(r.range) }
+        case .unfoldHere:
+            if let r = FoldStore.folds(doc.storage).first(where: { ruler.line(forCharacter: $0.location) == caret }) { toggleFold(r) }
+        case .foldAll:
+            // Top-level regions only (folding a section folds what's inside it anyway).
+            let top = regions.filter { r in !regions.contains { o in o != r && o.startLine <= r.startLine && o.endLine >= r.endLine && o.range.length > r.range.length } }
+            let sel = textView.selectedRange().location
+            for r in top where !(sel > r.range.location && sel <= NSMaxRange(r.range)) { FoldStore.fold(r.range, in: doc.storage) }
+            doc.rehighlight()
+            ruler.needsDisplay = true
+        case .unfoldAll:
+            FoldStore.unfoldAll(in: doc.storage)
+            doc.rehighlight()
+            ruler.needsDisplay = true
+        }
+    }
+
+    func textDidChange(_ notification: Notification) { updateFoldRegions() }
+
+    /// Re-runs Visual mode's formatting for the open document (new equation images, a resized column, the
+    /// preamble opened or closed).
+    func refreshVisual() {
+        guard Preferences.shared.visualMode, let doc = document, doc.kind == .tex else { return }
+        let ns = textView.string as NSString
+        let reveal = Highlighter.visualReveal(at: textView.selectedRange().location, in: ns)
+        Highlighter.revealRange = reveal
+        Highlighter.highlightVisual(doc.storage, reveal: reveal, batch: true, project: model)
+    }
+
+    private var visualRefreshTask: Task<Void, Never>?
+    private var lastPreambleExpanded = false
+    private func refreshVisualSoon() {
+        visualRefreshTask?.cancel()
+        visualRefreshTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+            self?.refreshVisual()
+        }
+    }
+
+    /// Visual mode opens below the folded preamble rather than inside it.
+    private func moveCaretOutOfPreambleIfVisual() {
+        guard Preferences.shared.visualMode, !Highlighter.preambleExpanded, let doc = document, doc.kind == .tex else { return }
+        let ns = textView.string as NSString
+        let start = ns.range(of: "\\begin{document}")
+        guard start.location != NSNotFound, textView.selectedRange().location < NSMaxRange(start) else { return }
+        textView.setSelectedRange(NSRange(location: NSMaxRange(start), length: 0))
     }
 
     // MARK: Document switching
@@ -107,6 +227,8 @@ final class EditorController: NSObject, NSTextViewDelegate, LaTeXTextViewDelegat
         if let doc {
             let sel = NSRange(location: min(doc.selection.location, storage.length), length: 0)
             textView.setSelectedRange(sel)
+            moveCaretOutOfPreambleIfVisual()
+            updateFoldRegions(now: true)
             let y = doc.scrollY
             DispatchQueue.main.async { [weak self] in
                 self?.scrollView.contentView.scroll(to: NSPoint(x: 0, y: y))
@@ -128,20 +250,36 @@ final class EditorController: NSObject, NSTextViewDelegate, LaTeXTextViewDelegat
         scrollView.rulersVisible = Preferences.shared.lineNumbers && !visual
         textView.gutterInset = scrollView.rulersVisible ? ruler.ruleThickness : 0
         textView.visualColumn = visual
-        Highlighter.revealRange = visual ? (textView.string as NSString).lineRange(for: NSRange(location: min(textView.selectedRange().location, (textView.string as NSString).length), length: 0)) : nil
+        // Vim on or off.
+        if Preferences.shared.keybindings == "vim" {
+            if textView.vim == nil {
+                let v = VimEngine(textView: textView)
+                v.onModeChange = { [weak self] m in self?.model.vimMode = m.rawValue }
+                v.onCommandLine = { [weak self] in PaletteSeed.shared.text = ":"; self?.model.showPalette = true }
+                textView.vim = v
+                model.vimMode = v.mode.rawValue
+            }
+        } else if textView.vim != nil {
+            textView.vim = nil
+            model.vimMode = nil
+        }
+        if visual { moveCaretOutOfPreambleIfVisual() }
+        Highlighter.revealRange = visual ? Highlighter.visualReveal(at: textView.selectedRange().location, in: textView.string as NSString) : nil
         textView.applyTheme()
         if !first { for d in model.openDocs { d.rehighlight() } }
         ruler.invalidate()
     }
 
-    func setIssues(_ issues: [CompileIssue]) {
+    func setIssues(_ issues: [CompileIssue], live: [String: [CompileIssue]] = [:]) {
         textView.setIssues(issuesFor(document), from: issues)
         ruler.issueLines = issueLines(for: document)
     }
 
+    /// This file's problems: the live checker's first (they match the text as it is now), then the compile's.
     private func issuesFor(_ doc: TextDocument?) -> [CompileIssue] {
         guard let doc else { return [] }
-        return model.issues.filter { ($0.file ?? model.mainFile) == doc.relativePath && $0.line != nil }
+        let live = model.liveIssues[doc.relativePath] ?? []
+        return live + model.issues.filter { ($0.file ?? model.mainFile) == doc.relativePath && $0.line != nil }
     }
 
     private func issueLines(for doc: TextDocument?) -> [Int: CompileIssue.Severity] {
@@ -237,6 +375,7 @@ final class EditorController: NSObject, NSTextViewDelegate, LaTeXTextViewDelegat
 
     func textViewDidChangeSelection(_ notification: Notification) {
         updateCaret()
+        scheduleSelectionActions()
         revealCaretLineIfVisual()
         scheduleMathPreview()
         if completionPanel.isVisible {
@@ -254,12 +393,27 @@ final class EditorController: NSObject, NSTextViewDelegate, LaTeXTextViewDelegat
 
     /// In Visual mode the caret's line shows raw LaTeX; move that reveal when the caret changes line.
     private func revealCaretLineIfVisual() {
-        guard Preferences.shared.visualMode, let doc = document, doc.kind == .tex else { return }
+        guard let doc = document else { return }
+        let loc = textView.selectedRange().location
+        // The caret moved into a fold: open it.
+        if !Preferences.shared.visualMode {
+            if FoldStore.unfold(containing: loc, in: doc.storage) { doc.rehighlight() }
+            return
+        }
+        guard doc.kind == .tex else { return }
         let ns = textView.string as NSString
-        let line = ns.lineRange(for: NSRange(location: min(textView.selectedRange().location, ns.length), length: 0))
-        guard line != Highlighter.revealRange else { return }
-        Highlighter.revealRange = line
-        Highlighter.highlightVisual(doc.storage, reveal: line, batch: true)
+        // Moving into the folded preamble opens it.
+        if !Highlighter.preambleExpanded {
+            let start = ns.range(of: "\\begin{document}")
+            if start.location != NSNotFound, loc < start.location, textView.window?.firstResponder === textView {
+                Highlighter.preambleExpanded = true
+            }
+        }
+        let reveal = Highlighter.visualReveal(at: loc, in: ns)
+        guard reveal != Highlighter.revealRange || Highlighter.preambleExpanded != lastPreambleExpanded else { return }
+        Highlighter.revealRange = reveal
+        lastPreambleExpanded = Highlighter.preambleExpanded
+        Highlighter.highlightVisual(doc.storage, reveal: reveal, batch: true, project: model)
     }
 
     private func updateCaret() {
@@ -376,6 +530,35 @@ final class EditorController: NSObject, NSTextViewDelegate, LaTeXTextViewDelegat
         let url = dir.appendingPathComponent("pasted-\(f.string(from: Date())).\(type)")
         guard (try? data.write(to: url)) != nil else { return }
         textViewDropImages(tv, urls: [url], at: tv.selectedRange().location)
+    }
+
+    func textViewActivateWidget(_ tv: LaTeXTextView, _ widget: WidgetRef, range: NSRange) {
+        guard let doc = document else { return }
+        switch widget.kind {
+        case .table:
+            let ns = tv.string as NSString
+            guard let table = TableModel.parse(latex: ns.substring(with: range)) else { return }
+            model.tableReplaceRange = range
+            model.tableDraft = table
+        case .preamble, .preambleShown:
+            Highlighter.preambleExpanded.toggle()
+            if !Highlighter.preambleExpanded { moveCaretOutOfPreambleIfVisual() }
+            refreshVisual()
+        case .fold:
+            FoldStore.unfold(range, in: doc.storage)
+            doc.rehighlight()
+        default:
+            break
+        }
+    }
+
+    func textViewDidPasteRich(_ tv: LaTeXTextView, latex: String, plain: String, at location: Int) {
+        let inserted = NSRange(location: location, length: (latex as NSString).length)
+        model.showToast("doc.richtext", "Pasted with formatting", actionTitle: "Paste as plain text") { [weak self, weak tv] in
+            guard let tv, let self, self.document != nil, NSMaxRange(inserted) <= (tv.string as NSString).length,
+                  (tv.string as NSString).substring(with: inserted) == latex else { return }
+            tv.insertText(plain, replacementRange: inserted)
+        }
     }
 
     func textViewPasteTable(_ tv: LaTeXTextView, text: String) -> Bool {
@@ -595,7 +778,29 @@ final class EditorController: NSObject, NSTextViewDelegate, LaTeXTextViewDelegat
         peekToken = nil
     }
 
+    /// A small "Comment" button beside a selection, once the selection settles.
+    private func scheduleSelectionActions() {
+        selectionTask?.cancel()
+        selectionPanel.hide(animated: false)
+        let sel = textView.selectedRange()
+        guard sel.length > 0, document != nil, !completionPanel.isVisible else { return }
+        selectionTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(450))
+            guard !Task.isCancelled, let self, self.textView.selectedRange() == sel, NSEvent.pressedMouseButtons == 0,
+                  let lm = self.textView.layoutManager, let tc = self.textView.textContainer else { return }
+            let g = lm.glyphRange(forCharacterRange: NSRange(location: NSMaxRange(sel) - 1, length: 1), actualCharacterRange: nil)
+            var r = lm.boundingRect(forGlyphRange: g, in: tc)
+            r.origin.x += self.textView.textContainerOrigin.x
+            r.origin.y += self.textView.textContainerOrigin.y
+            self.selectionPanel.show(SelectionActions(comment: { [weak self] in
+                self?.selectionPanel.hide(animated: false)
+                self?.model.beginComment()
+            }), near: r, in: self.textView, gap: 4)
+        }
+    }
+
     private func hideFloating() {
+        selectionPanel.hide(animated: false)
         hidePeek()
         hideCompletion()
         mathPanel.hide(animated: false)
@@ -697,6 +902,26 @@ final class EditorController: NSObject, NSTextViewDelegate, LaTeXTextViewDelegat
         rect.size.width = 10
         hidePeek()
         mathPanel.show(PeekCard(content: content, caption: "Live preview · uses your preamble"), near: rect, in: textView, gap: -14)
+    }
+}
+
+/// The quick action shown beside a selection.
+private struct SelectionActions: View {
+    let comment: () -> Void
+    @State private var hovering = false
+    var body: some View {
+        Button(action: comment) {
+            Label("Comment", systemImage: "text.bubble")
+                .font(.system(size: 11.5, weight: .medium))
+                .padding(.horizontal, 10).padding(.vertical, 5)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(hovering ? accent : Color(theme.text))
+        .background(Capsule().fill(Color(theme.surface)))
+        .overlay(Capsule().strokeBorder(Color(theme.hairline)))
+        .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
+        .onHover { hovering = $0 }
+        .help("Comment on the selection (⌥⌘M)")
     }
 }
 

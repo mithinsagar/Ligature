@@ -7,6 +7,7 @@ struct PDFPane: View {
     @Bindable var model: ProjectModel
     @State private var state = PDFState()
     @State private var hoveringControls = false
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -24,8 +25,16 @@ struct PDFPane: View {
                     .opacity(hoveringControls || state.recentlyChanged ? 1 : 0.88)
                     .onHover { hoveringControls = $0 }
             }
+            if model.showLogs {
+                LogsPane(model: model)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
         .animation(.panel, value: model.pdfData == nil)
+        .animation(.panel, value: model.showLogs)
+        .onReceive(NotificationCenter.default.publisher(for: .init("LigatureTestDetach"))) { n in
+            if (n.object as? URL) == model.root { openWindow(id: "pdf", value: model.root) }  // test hook
+        }
     }
 
     @ViewBuilder var placeholder: some View {
@@ -40,7 +49,11 @@ struct PDFPane: View {
                     .font(.system(size: 11)).foregroundStyle(Color(theme.secondary).opacity(0.8))
             }
         case .failed:
-            EmptyState(symbol: "exclamationmark.triangle", title: "No PDF yet", message: "Fix the first error in the Issues panel and the preview appears here.")
+            VStack(spacing: 10) {
+                EmptyState(symbol: "exclamationmark.triangle", title: "No PDF yet", message: "Fix the first error and the preview appears here.")
+                    .frame(height: 130)
+                Button { model.showLogs = true } label: { Label("View Logs", systemImage: "doc.text.magnifyingglass") }.buttonStyle(.ligSecondary)
+            }
         default:
             VStack(spacing: 10) {
                 EmptyState(symbol: "doc.richtext", title: "Preview", message: "Compile to see your document.")
@@ -64,6 +77,26 @@ struct PDFPane: View {
             IconButton(symbol: "plus.magnifyingglass", help: "Zoom in", shortcut: "⌘+", size: 26) { state.zoom(by: 1) }
             divider
             IconButton(symbol: "text.viewfinder", help: "Show caret position in PDF", shortcut: "⌘⇧J", size: 26) { model.syncToPDF() }
+            IconButton(symbol: "play.rectangle", help: "Present full screen (arrows to move, Esc to stop)", size: 26) {
+                if let d = model.pdfData { PresentationController.start(data: d, page: state.page, screen: state.view?.window?.screen) }
+            }
+            if !model.pdfDetached {
+                IconButton(symbol: "macwindow.on.rectangle", help: "Open the PDF in its own window", size: 26) {
+                    openWindow(id: "pdf", value: model.root)
+                }
+            }
+            IconButton(symbol: "doc.text.magnifyingglass", help: "Logs and output files", size: 26, selected: model.showLogs) { model.showLogs.toggle() }
+                .overlay(alignment: .topTrailing) {
+                    if model.errorCount > 0 {
+                        Text("\(model.errorCount)")
+                            .font(.system(size: 8.5, weight: .bold).monospacedDigit())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 3.5).frame(minWidth: 13, minHeight: 13)
+                            .background(Capsule().fill(Color(theme.error)))
+                            .offset(x: 3, y: -2)
+                            .allowsHitTesting(false)
+                    }
+                }
             IconButton(symbol: Preferences.shared.pdfDarkPaper ? "moon.fill" : "moon", help: "Dark paper", size: 26, selected: Preferences.shared.pdfDarkPaper) {
                 Preferences.shared.pdfDarkPaper.toggle()
             }
@@ -91,7 +124,14 @@ private struct ZoomLabel: View {
             .onTapGesture(count: 2) { state.resetZoom() }
             .onTapGesture(count: 1) { state.fitWidth() }
             .onHover { h in withAnimation(.hover) { hovering = h } }
-            .help("100% fits the page to the width · click or double-click to return to it")
+            .help("100% fits the page to the width · click or double-click to return to it · right-click for more")
+            .contextMenu {
+                Button("Fit Width") { state.fitWidth() }
+                Button("Fit Whole Page") { state.fitHeight() }
+                Divider()
+                Button("Zoom In") { state.zoom(by: 1) }
+                Button("Zoom Out") { state.zoom(by: -1) }
+            }
     }
 }
 
@@ -102,8 +142,10 @@ final class PDFState {
     var pages = 0
     var scale: CGFloat = 1
     var recentlyChanged = false
-    /// While true the page keeps fitting the pane's width as it resizes. Any manual zoom turns it off.
+    /// While true the page keeps fitting the pane as it resizes. Any manual zoom turns it off.
     var fitMode = true
+    /// Fit the whole page (height) rather than the width.
+    var fitToHeight = false
     /// The scale at which the page exactly fits the pane's width. Shown as 100%; zoom steps are relative to it.
     var fitBase: CGFloat = 1
     private var fitRetries = 0
@@ -136,11 +178,33 @@ final class PDFState {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.18
                 v.scaleFactor = s
+            } completionHandler: { [weak self] in
+                MainActor.assumeIsolated { self?.settleLayout() }
             }
         } else {
             v.scaleFactor = s
+            settleLayout()
         }
         scale = s
+    }
+
+    /// PDFKit keeps its document view at the widest size it has had, so after the pane shrinks the page sits
+    /// off-centre in a too-wide canvas. Relaying out shrinks it back and keeps the page centred.
+    func settleLayout() {
+        guard let v = view else { return }
+        v.layoutDocumentView()
+        if let sv = scrollView, let doc = v.documentView {
+            let clip = sv.contentView
+            // Narrower than the pane (zoomed out): centre it instead of pinning it to the left edge.
+            let slack = clip.bounds.width - doc.frame.width
+            if slack > -0.5 {
+                let x = -max(slack, 0) / 2
+                if abs(clip.bounds.origin.x - x) > 0.5 {
+                    clip.setBoundsOrigin(NSPoint(x: x, y: clip.bounds.origin.y))
+                    sv.reflectScrolledClipView(clip)
+                }
+            }
+        }
     }
 
     func zoom(by direction: Int) {
@@ -162,11 +226,39 @@ final class PDFState {
         // The clip view excludes any visible scroller, so the gaps come out equal.
         let viewWidth = scrollView?.contentView.frame.width ?? v.bounds.width
         guard viewWidth > 120 else { return nil }
-        return (viewWidth - Self.margin * 2) / pageWidth
+        // PDFKit scales the page-break margins with the page, so the canvas is (page + 2 margins) × scale wide.
+        // Fitting that to the pane leaves no slack, so the page is centred with equal gaps at every size.
+        return viewWidth / (pageWidth + Self.margin * 2)
     }
 
     func updateFitBase() {
         if let f = computeFitScale() { fitBase = f }
+    }
+
+    /// The scale that shows a whole page (its height, and its width if that's tighter).
+    func computeFitHeightScale() -> CGFloat? {
+        guard let v = view, let doc = v.document, doc.pageCount > 0, let w = computeFitScale() else { return nil }
+        let pageHeight = (0..<doc.pageCount).compactMap { doc.page(at: $0)?.bounds(for: v.displayBox).height }.max() ?? 792
+        let viewHeight = scrollView?.contentView.frame.height ?? v.bounds.height
+        guard viewHeight > 120 else { return nil }
+        return min(w, viewHeight / (pageHeight + Self.margin * 2))
+    }
+
+    /// What fitting currently means (width or whole page).
+    func targetFitScale() -> CGFloat? { fitToHeight ? computeFitHeightScale() : computeFitScale() }
+
+    /// Refits in the current fit mode (after a resize).
+    func refit(animated: Bool = false) { fitToHeight ? fitHeight(animated: animated) : fitWidth(animated: animated) }
+
+    /// Shows a whole page at once; keeps doing so as the pane resizes.
+    func fitHeight(animated: Bool = true) {
+        updateFitBase()
+        guard let f = computeFitHeightScale() else { return }
+        fitMode = true
+        fitToHeight = true
+        setScale(f, animated: animated)
+        // Bring the current page fully into view.
+        if let p = view?.currentPage { view?.go(to: p) }
     }
 
     /// Fits the widest page to the pane with an equal gap on both sides (shown as 100%). Before the pane has
@@ -182,6 +274,7 @@ final class PDFState {
         fitRetries = 0
         fitBase = f
         fitMode = true
+        fitToHeight = false
         setScale(f, animated: animated)
     }
 }
@@ -319,8 +412,9 @@ struct PDFRepresentable: NSViewRepresentable {
         container.postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: container, queue: .main) { _ in
             MainActor.assumeIsolated {
-                if state.fitMode { state.fitWidth(animated: false) } else { state.updateFitBase() }
-                c.refreshGlow()
+                c.paneResized()
+                // The PDF view's own layout lags the container's, so measure again once it has settled.
+                DispatchQueue.main.async { c.paneResized() }
             }
         }
         NotificationCenter.default.addObserver(forName: .PDFViewPageChanged, object: v, queue: .main) { _ in
@@ -363,6 +457,9 @@ struct PDFRepresentable: NSViewRepresentable {
         weak var container: NSView?
         weak var glow: PageGlowView?
         weak var observedClip: NSClipView?
+        private var lastFitWidth: CGFloat = 0
+        weak var observedWindow: NSWindow?
+        private var settleWork: DispatchWorkItem?
         var magnifyMonitor: Any?
         weak var state: PDFState?
         var lastScanToken = 0
@@ -621,7 +718,53 @@ struct PDFRepresentable: NSViewRepresentable {
                 NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: .main) { [weak self] _ in
                     MainActor.assumeIsolated { self?.glow?.needsDisplay = true }
                 }
+                // The clip view is what fit-width measures, so refit whenever its width really changes
+                // (window resize, maximise, full screen, sidebar or divider moves).
+                clip.postsFrameChangedNotifications = true
+                NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: clip, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.paneResized() }
+                }
             }
+            // A final pass once the window stops changing (end of a drag, zoom, or full-screen transition),
+            // when every view has its final size.
+            if let window = view?.window, window !== observedWindow {
+                observedWindow = window
+                for name in [NSWindow.didEndLiveResizeNotification, NSWindow.didExitFullScreenNotification, NSWindow.didEnterFullScreenNotification] {
+                    NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                        MainActor.assumeIsolated {
+                            self?.paneResized(force: true)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self?.paneResized(force: true) }
+                        }
+                    }
+                }
+            }
+        }
+
+        /// Keeps 100% meaning "fits the width" at any pane size: in fit mode the page refits, otherwise the
+        /// manual zoom stays put and the percentage is recomputed against the new width.
+        func paneResized(force: Bool = false) {
+            guard let state else { return }
+            if !force, let clip = observedClip {
+                let w = clip.frame.width
+                guard abs(w - lastFitWidth) > 0.5 else { return }
+                lastFitWidth = w
+            }
+            if let clip = observedClip { lastFitWidth = clip.frame.width }
+            if state.fitMode { state.refit() } else { state.updateFitBase(); state.settleLayout() }
+            refreshGlow()
+            // Window animations (maximise, restore, full screen) and PDFKit's own layout can land after the
+            // last notification, so measure once more when the size has been still for a moment.
+            settleWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, let state = self.state else { return }
+                if state.fitMode {
+                    if let f = state.targetFitScale(), abs(f - state.effectiveScale) > 0.001 { state.refit() }
+                    else { state.settleLayout() }
+                } else { state.updateFitBase() }
+                self.refreshGlow()
+            }
+            settleWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
         }
 
         func applyAppearance(dark: Bool) {

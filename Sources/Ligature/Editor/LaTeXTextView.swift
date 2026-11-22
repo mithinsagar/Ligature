@@ -10,6 +10,10 @@ import LigatureCore
     func textViewPasteTable(_ tv: LaTeXTextView, text: String) -> Bool
     func textViewCompletionKey(_ tv: LaTeXTextView, _ key: LaTeXTextView.CompletionKey) -> Bool
     func textViewDidType(_ tv: LaTeXTextView)
+    /// A widget that acts like a button (a table, the preamble bar, a fold) was clicked.
+    func textViewActivateWidget(_ tv: LaTeXTextView, _ widget: WidgetRef, range: NSRange)
+    /// Formatted text (Word, a web page…) was pasted and converted to LaTeX.
+    func textViewDidPasteRich(_ tv: LaTeXTextView, latex: String, plain: String, at location: Int)
 }
 
 /// The editor surface: TextKit 1 text view with LaTeX-aware typing, snippet tab stops, a current-line highlight,
@@ -26,6 +30,15 @@ final class LaTeXTextView: NSTextView {
     private var hoverIndex: Int?
     private var lastPressureStage = 0
     private var commandHoverRange: NSRange?
+    /// Vim keybindings, when turned on in Settings.
+    var vim: VimEngine?
+    private var blockCursor: Bool { vim != nil && vim?.mode != .insert }
+    /// The widget under the pointer (for hover styling), by its anchor's character index.
+    private var hoveredWidget: Int?
+    /// Comment ranges to highlight in this storage: (range, in focus, resolved).
+    var commentRanges: ((NSTextStorage) -> [(NSRange, Bool, Bool)])?
+    /// Called when the text column's width changes (Visual mode sizes figures and tables to it).
+    var onColumnWidthChange: ((CGFloat) -> Void)?
 
     // MARK: Setup
 
@@ -81,6 +94,10 @@ final class LaTeXTextView: NSTextView {
         }
         defaultParagraphStyle = Highlighter.baseAttributes()[.paragraphStyle] as? NSParagraphStyle
         isContinuousSpellCheckingEnabled = prefs.spellCheck
+        isGrammarCheckingEnabled = prefs.spellCheck && prefs.grammarCheck
+        let checker = NSSpellChecker.shared
+        if prefs.spellLanguage.isEmpty { checker.automaticallyIdentifiesLanguages = true }
+        else if checker.language() != prefs.spellLanguage { checker.automaticallyIdentifiesLanguages = false; checker.setLanguage(prefs.spellLanguage) }
         textContainer?.widthTracksTextView = false
         if !prefs.wrapLines {
             textContainer?.size = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -139,7 +156,10 @@ final class LaTeXTextView: NSTextView {
     func updateContainerWidth() {
         guard let tc = textContainer, !isHorizontallyResizable else { return }
         let w = max(60, frame.width - horizontalInset * 2 - gutterInset)
-        if abs(tc.size.width - w) > 0.5 { tc.size = NSSize(width: w, height: CGFloat.greatestFiniteMagnitude) }
+        if abs(tc.size.width - w) > 0.5 {
+            tc.size = NSSize(width: w, height: CGFloat.greatestFiniteMagnitude)
+            onColumnWidthChange?(w - tc.lineFragmentPadding * 2)
+        }
     }
 
     // MARK: Drawing
@@ -163,6 +183,22 @@ final class LaTeXTextView: NSTextView {
             guard lineRect.intersects(rect) else { continue }
             (issue.severity == .error ? t.error : t.warning).withAlphaComponent(t.isDark ? 0.09 : 0.06).setFill()
             lineRect.fill()
+        }
+
+        // Commented text: a soft highlighter wash, stronger for the comment in focus.
+        if let ts = textStorage {
+            let comments = MainActor.assumeIsolated { commentRanges?(ts) ?? [] }
+            for (r, focused, resolved) in comments where !resolved && r.length > 0 && NSMaxRange(r) <= ns.length {
+                let g = lm.glyphRange(forCharacterRange: r, actualCharacterRange: nil)
+                lm.enumerateEnclosingRects(forGlyphRange: g, withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0), in: tc) { rect, _ in
+                    var box = rect.offsetBy(dx: origin.x, dy: origin.y)
+                    box.size.height -= 2
+                    t.warning.withAlphaComponent(focused ? 0.38 : (t.isDark ? 0.2 : 0.16)).setFill()
+                    NSBezierPath(roundedRect: box, xRadius: 2, yRadius: 2).fill()
+                    t.warning.withAlphaComponent(focused ? 0.9 : 0.55).setFill()
+                    NSRect(x: box.minX, y: box.maxY - 1.5, width: box.width, height: 1.5).fill()
+                }
+            }
         }
 
         // Current line (only when nothing is selected).
@@ -190,6 +226,101 @@ final class LaTeXTextView: NSTextView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        drawWidgets(in: dirtyRect)
+        drawInlineIssues(in: dirtyRect)
+    }
+
+    // MARK: Widgets
+
+    /// Each visible widget with the rect it occupies (blocks span the column).
+    func visibleWidgets(in rect: NSRect) -> [(widget: WidgetRef, anchor: Int, rect: NSRect, column: NSRect)] {
+        guard let lm = layoutManager, let tc = textContainer, let ts = textStorage, ts.length > 0 else { return [] }
+        let origin = textContainerOrigin
+        let glyphs = lm.glyphRange(forBoundingRect: rect.offsetBy(dx: -origin.x, dy: -origin.y), in: tc)
+        let chars = lm.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+        var out: [(WidgetRef, Int, NSRect, NSRect)] = []
+        ts.enumerateAttribute(Highlighter.anchorKey, in: chars, options: []) { v, r, _ in
+            guard v != nil else { return }
+            for ci in r.location..<NSMaxRange(r) {
+                guard let w = ts.attribute(Highlighter.widgetKey, at: ci, effectiveRange: nil) as? WidgetRef else { continue }
+                let g = lm.glyphIndexForCharacter(at: ci)
+                let frag = lm.lineFragmentRect(forGlyphAt: g, effectiveRange: nil)
+                var box = lm.boundingRect(forGlyphRange: NSRange(location: g, length: 1), in: tc)
+                box.origin.x += origin.x
+                box.origin.y = frag.minY + origin.y
+                box.size.height = frag.height
+                let column = NSRect(x: origin.x + tc.lineFragmentPadding, y: frag.minY + origin.y, width: tc.size.width - tc.lineFragmentPadding * 2, height: frag.height)
+                if !w.isBlock {
+                    // Centre inline maths on the maths axis (a quarter em above the baseline), as TeX does.
+                    let baseline = frag.minY + lm.location(forGlyphAt: g).y + origin.y
+                    let em = (ts.attribute(.font, at: ci, effectiveRange: nil) as? NSFont)?.pointSize ?? 16
+                    let axis = w.kind == .inlineMath ? baseline - em * 0.27 : box.midY
+                    box = NSRect(x: box.minX, y: axis - w.size.height / 2, width: w.size.width, height: w.size.height)
+                }
+                out.append((w, ci, w.isBlock ? column : box, column))
+            }
+        }
+        return out
+    }
+
+    private func drawWidgets(in dirtyRect: NSRect) {
+        let items = visibleWidgets(in: dirtyRect.insetBy(dx: 0, dy: -400))
+        guard !items.isEmpty else { return }
+        let (t, accent, size) = MainActor.assumeIsolated { (ThemeManager.shared.theme, ThemeManager.shared.accentNS, Preferences.shared.visualMode ? Preferences.shared.editorFontSize + 2.5 : Preferences.shared.editorFontSize) }
+        for item in items where item.rect.intersects(dirtyRect) {
+            let hovering = hoveredWidget == item.anchor
+            MainActor.assumeIsolated {
+                item.widget.draw(in: item.rect, column: item.column, theme: t, accent: accent, fontSize: size, hovering: hovering)
+            }
+        }
+    }
+
+    func widget(at p: NSPoint) -> (widget: WidgetRef, anchor: Int, rect: NSRect)? {
+        visibleWidgets(in: visibleRect).first { $0.rect.contains(p) }.map { ($0.widget, $0.anchor, $0.rect) }
+    }
+
+    /// The whole source range a widget stands in for.
+    func widgetRange(anchor: Int) -> NSRange? {
+        guard let ts = textStorage, anchor < ts.length else { return nil }
+        var r = NSRange()
+        guard ts.attribute(Highlighter.widgetKey, at: anchor, longestEffectiveRange: &r, in: NSRange(location: 0, length: ts.length)) != nil else { return nil }
+        return r
+    }
+
+    /// Wavy underlines under the exact text the live checker flagged.
+    private func drawSquiggles(in dirtyRect: NSRect) {
+        guard let lm = layoutManager, let tc = textContainer else { return }
+        let t = MainActor.assumeIsolated { ThemeManager.shared.theme }
+        let ns = string as NSString
+        for issue in issues where issue.isLive {
+            guard let line = issue.line, let col = issue.column, let lr = LaTeXText.range(ofLine: line, in: ns) else { continue }
+            let start = lr.location + col - 1
+            guard start < NSMaxRange(lr) || (start == NSMaxRange(lr) && start < ns.length) else { continue }
+            let r = NSRange(location: start, length: max(1, min(issue.length ?? 1, NSMaxRange(lr) - start)))
+            let g = lm.glyphRange(forCharacterRange: r, actualCharacterRange: nil)
+            guard g.length > 0 else { continue }
+            var rect = lm.boundingRect(forGlyphRange: g, in: tc)
+            rect.origin.x += textContainerOrigin.x
+            rect.origin.y += textContainerOrigin.y
+            guard rect.intersects(dirtyRect.insetBy(dx: 0, dy: -4)) else { continue }
+            let path = NSBezierPath()
+            let y = rect.maxY - 1.5, amp: CGFloat = 1.6, step: CGFloat = 2.5
+            var x = rect.minX
+            path.move(to: NSPoint(x: x, y: y))
+            var up = true
+            while x < rect.maxX {
+                x = min(rect.maxX, x + step)
+                path.line(to: NSPoint(x: x, y: y + (up ? -amp : amp)))
+                up.toggle()
+            }
+            path.lineWidth = 1.2
+            (issue.severity == .error ? t.error : t.warning).setStroke()
+            path.stroke()
+        }
+    }
+
+    private func drawInlineIssues(in dirtyRect: NSRect) {
+        drawSquiggles(in: dirtyRect)
         let showInline = MainActor.assumeIsolated { Preferences.shared.inlineIssues }
         guard showInline, !issues.isEmpty, let lm = layoutManager, let tc = textContainer else { return }
         let t = MainActor.assumeIsolated { ThemeManager.shared.theme }
@@ -292,6 +423,32 @@ final class LaTeXTextView: NSTextView {
         fade.isRemovedOnCompletion = false
         mark.add(fade, forKey: "fade")
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.6) { mark.removeFromSuperlayer() }
+    }
+
+    // MARK: Vim
+
+    override func keyDown(with event: NSEvent) {
+        if let vim, vim.handle(event) { return }
+        super.keyDown(with: event)
+    }
+
+    override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
+        guard blockCursor else { super.drawInsertionPoint(in: rect, color: color, turnedOn: flag); return }
+        var r = rect
+        let font = (typingAttributes[.font] as? NSFont) ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        r.size.width = max(6, font.maximumAdvancement.width)
+        if flag {
+            color.withAlphaComponent(0.45).setFill()
+            r.fill(using: .sourceOver)
+        } else {
+            setNeedsDisplay(r.insetBy(dx: -1, dy: 0), avoidAdditionalLayout: true)
+        }
+    }
+
+    override func setNeedsDisplay(_ rect: NSRect, avoidAdditionalLayout flag: Bool) {
+        var r = rect
+        if blockCursor { r.size.width += 14 }
+        super.setNeedsDisplay(r, avoidAdditionalLayout: flag)
     }
 
     // MARK: Typing
@@ -592,6 +749,15 @@ final class LaTeXTextView: NSTextView {
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
         let p = convert(event.locationInWindow, from: nil)
+        let hit = widget(at: p)
+        if hit?.anchor != hoveredWidget {
+            hoveredWidget = hit?.anchor
+            needsDisplay = true
+        }
+        if let hit {
+            (hit.widget.isButton ? NSCursor.pointingHand : NSCursor.arrow).set()
+            return
+        }
         let idx = characterIndex(atViewPoint: p)
         updateCommandHover(index: idx, commandDown: event.modifierFlags.contains(.command))
         if idx != hoverIndex {
@@ -602,6 +768,7 @@ final class LaTeXTextView: NSTextView {
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
+        if hoveredWidget != nil { hoveredWidget = nil; needsDisplay = true }
         hoverIndex = nil
         updateCommandHover(index: nil, commandDown: false)
         latexDelegate?.textViewHover(self, at: nil, pointInView: .zero, force: false)
@@ -633,6 +800,21 @@ final class LaTeXTextView: NSTextView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if let hit = widget(at: point), let range = widgetRange(anchor: hit.anchor) {
+            latexDelegate?.textViewHover(self, at: nil, pointInView: .zero, force: false)
+            window?.makeFirstResponder(self)
+            if hit.widget.isButton && !event.modifierFlags.contains(.option) {
+                latexDelegate?.textViewActivateWidget(self, hit.widget, range: range)
+            } else {
+                // Rendered maths, figures and the title open their source for editing.
+                let ns = string as NSString
+                let firstLine = ns.lineRange(for: NSRange(location: range.location, length: 0))
+                let caret = hit.widget.isBlock ? min(NSMaxRange(firstLine) - 1, NSMaxRange(range)) : min(range.location + 1, NSMaxRange(range))
+                setSelectedRange(NSRange(location: max(range.location, caret), length: 0))
+            }
+            return
+        }
         if event.modifierFlags.contains(.command), event.clickCount == 1 {
             let p = convert(event.locationInWindow, from: nil)
             if let idx = characterIndex(atViewPoint: p), latexDelegate?.textViewCommandClick(self, at: idx) == true { return }
@@ -683,16 +865,31 @@ final class LaTeXTextView: NSTextView {
         return true
     }
 
-    override func paste(_ sender: Any?) {
-        let pb = NSPasteboard.general
-        if let s = pb.string(forType: .string), s.contains("\t"), s.contains("\n"), latexDelegate?.textViewPasteTable(self, text: s) == true { return }
+    override func paste(_ sender: Any?) { paste(from: NSPasteboard.general) }
+
+    func paste(from pb: NSPasteboard) {
+        // Cells copied from Numbers, Excel or Google Sheets open the table builder. (Formatted text also carries
+        // tabs, e.g. list markers, so only when the rich version really is a table.)
+        let html = pb.data(forType: .html).flatMap { String(data: $0, encoding: .utf8) }
+        let rtf = pb.data(forType: .rtf).flatMap { String(data: $0, encoding: .ascii) }
+        let plainLines = (pb.string(forType: .string) ?? "").components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        let allRows = !plainLines.isEmpty && plainLines.allSatisfy { $0.contains("\t") }
+        let isSheet = (html == nil && rtf == nil) || (allRows && (html?.contains("<td") == true || rtf?.contains("\\trowd") == true))
+        if isSheet, let s = pb.string(forType: .string), s.contains("\t"), s.contains("\n"), latexDelegate?.textViewPasteTable(self, text: s) == true { return }
+        // Formatted text from Word, Pages, Google Docs or the web arrives as LaTeX.
+        if kind == .tex, let latex = MainActor.assumeIsolated({ RichPaste.latex(from: pb) }) {
+            let at = selectedRange().location
+            insertText(latex, replacementRange: selectedRange())
+            latexDelegate?.textViewDidPasteRich(self, latex: latex, plain: pb.string(forType: .string) ?? "", at: at)
+            return
+        }
         if pb.string(forType: .string) == nil {
             if let png = pb.data(forType: .png) { latexDelegate?.textViewPasteImage(self, data: png, type: "png"); return }
             if let tiff = pb.data(forType: .tiff), let rep = NSBitmapImageRep(data: tiff), let png = rep.representation(using: .png, properties: [:]) {
                 latexDelegate?.textViewPasteImage(self, data: png, type: "png"); return
             }
         }
-        super.paste(sender)
+        if let s = pb.string(forType: .string) { insertText(s, replacementRange: selectedRange()) }
     }
 
     override func pasteAsPlainText(_ sender: Any?) {

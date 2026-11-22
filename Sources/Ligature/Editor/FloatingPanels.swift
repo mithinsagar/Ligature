@@ -313,7 +313,7 @@ struct PeekCard: View {
 
 enum MathImage {
     /// Renders the first page of a snippet PDF to a template image (alpha = ink), scaled for Retina.
-    static func make(from data: Data, scale: CGFloat = 1.55) -> NSImage? {
+    static func make(from data: Data, scale: CGFloat = 1.55, trim: Bool = false) -> NSImage? {
         guard let doc = PDFDocument(data: data), let page = doc.page(at: 0) else { return nil }
         let box = page.bounds(for: .cropBox)
         // Render now, while the document is alive (a lazy drawing handler would outlive it).
@@ -323,9 +323,31 @@ enum MathImage {
         ctx.scaleBy(x: scale * 2, y: scale * 2)
         ctx.translateBy(x: -box.minX, y: -box.minY)
         page.draw(with: .cropBox, to: ctx)
-        guard let cg = ctx.makeImage() else { return nil }
-        let image = NSImage(cgImage: cg, size: NSSize(width: box.width * scale, height: box.height * scale))
+        guard var cg = ctx.makeImage() else { return nil }
+        if trim, let cropped = trimmed(cg, context: ctx) { cg = cropped }
+        let image = NSImage(cgImage: cg, size: NSSize(width: CGFloat(cg.width) / 2, height: CGFloat(cg.height) / 2))
         image.isTemplate = true
         return image
+    }
+
+    /// Crops transparent margins (keeping a hair of padding), so a minipage-wide render shrinks to its ink.
+    private static func trimmed(_ cg: CGImage, context ctx: CGContext) -> CGImage? {
+        guard let data = ctx.data else { return nil }
+        let w = cg.width, h = cg.height, row = ctx.bytesPerRow
+        let p = data.bindMemory(to: UInt8.self, capacity: row * h)
+        var minX = w, maxX = -1, minY = h, maxY = -1
+        for y in 0..<h {
+            let base = y * row
+            for x in 0..<w where p[base + x * 4 + 3] > 8 {
+                if x < minX { minX = x }
+                if x > maxX { maxX = x }
+                if y < minY { minY = y }
+                if y > maxY { maxY = y }
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+        let pad = 3
+        let r = CGRect(x: max(0, minX - pad), y: max(0, minY - pad), width: min(w, maxX + pad + 1) - max(0, minX - pad), height: min(h, maxY + pad + 1) - max(0, minY - pad))
+        return cg.cropping(to: r)
     }
 }

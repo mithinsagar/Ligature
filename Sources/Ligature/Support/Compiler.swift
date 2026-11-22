@@ -53,11 +53,16 @@ enum EngineLocator {
 /// Where a project's build products live: ~/Library/Caches/Ligature/Builds/<hash>/ (never inside the project).
 enum BuildPaths {
     static func directory(for root: URL) -> URL {
-        let digest = SHA256.hash(data: Data(root.standardizedFileURL.path.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
-        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Ligature/Builds/\(root.lastPathComponent)-\(digest)", isDirectory: true)
+        let base = location(for: root)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base
+    }
+
+    /// Where a project's builds live, without creating anything (for looking up an earlier PDF).
+    static func location(for root: URL) -> URL {
+        let digest = SHA256.hash(data: Data(root.standardizedFileURL.path.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+        return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Ligature/Builds/\(root.lastPathComponent)-\(digest)", isDirectory: true)
     }
 }
 
@@ -85,52 +90,93 @@ final class CompileService {
         process = nil
     }
 
-    func compile(engine: EngineLocator.Found, main: URL, root: URL) async -> CompileResult {
+    struct Options {
+        /// Halt at the first error (no PDF) instead of typesetting past errors.
+        var stopOnFirstError = false
+        /// Skip images: graphicx draws frames instead, which compiles faster.
+        var draft = false
+    }
+
+    func compile(engine: EngineLocator.Found, main: URL, root: URL, options: Options = Options()) async -> CompileResult {
         cancel()
         generation += 1
         let myGeneration = generation
         let outDir = BuildPaths.directory(for: root)
-        let p = Process()
-        p.executableURL = engine.url
-        p.currentDirectoryURL = main.deletingLastPathComponent()
-        let jobName = main.deletingPathExtension().lastPathComponent
-        switch engine.engine {
-        case .tectonic:
-            p.arguments = ["-X", "compile", main.lastPathComponent, "--synctex", "--keep-logs", "--keep-intermediates",
-                           "--outdir", outDir.path, "-Z", "continue-on-errors", "--untrusted"]
-        case .latexmk:
-            p.arguments = ["-pdf", "-synctex=1", "-interaction=nonstopmode", "-file-line-error", "-halt-on-error-", "-outdir=\(outDir.path)", main.lastPathComponent]
-            var env = ProcessInfo.processInfo.environment
-            env["PATH"] = "/Library/TeX/texbin:/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
-            p.environment = env
-        }
-        let errPipe = Pipe(), outPipe = Pipe()
-        p.standardError = errPipe
-        p.standardOutput = outPipe
-        process = p
+        // Draft mode feeds TeX a one-line wrapper on standard input (which names the job "texput").
+        let jobName = options.draft && engine.engine == .tectonic ? "texput" : main.deletingPathExtension().lastPathComponent
         let start = Date()
 
-        let (status, stderrText): (Int32, String) = await withCheckedContinuation { cont in
-            DispatchQueue.global(qos: .userInitiated).async {
-                do { try p.run() } catch {
-                    cont.resume(returning: (-1, "error: could not start the engine: \(error.localizedDescription)"))
-                    return
+        func arguments(cachedOnly: Bool) -> [String] {
+            switch engine.engine {
+            case .tectonic:
+                var a = ["-X", "compile", options.draft ? "-" : main.lastPathComponent, "--synctex", "--keep-logs", "--keep-intermediates", "--outdir", outDir.path, "--untrusted"]
+                if !options.stopOnFirstError { a += ["-Z", "continue-on-errors"] }
+                // Packages already downloaded are enough most of the time, and this works offline.
+                if cachedOnly { a.append("--only-cached") }
+                return a
+            case .latexmk:
+                var a = ["-pdf", "-synctex=1", "-interaction=nonstopmode", "-file-line-error", options.stopOnFirstError ? "-halt-on-error" : "-halt-on-error-", "-outdir=\(outDir.path)"]
+                if options.draft { a.append("-usepretex=\\PassOptionsToPackage{draft}{graphicx}") }
+                return a + [main.lastPathComponent]
+            }
+        }
+
+        func run(_ args: [String]) async -> (Int32, String, Bool) {
+            let p = Process()
+            p.executableURL = engine.url
+            p.currentDirectoryURL = main.deletingLastPathComponent()
+            p.arguments = args
+            if engine.engine == .latexmk {
+                var env = ProcessInfo.processInfo.environment
+                env["PATH"] = "/Library/TeX/texbin:/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
+                p.environment = env
+            }
+            let errPipe = Pipe(), outPipe = Pipe(), inPipe = Pipe()
+            p.standardError = errPipe
+            p.standardOutput = outPipe
+            if options.draft && engine.engine == .tectonic { p.standardInput = inPipe }
+            process = p
+            let wrapper = "\\PassOptionsToPackage{draft}{graphicx}\\input{\(main.lastPathComponent)}\n"
+            let (status, text): (Int32, String) = await withCheckedContinuation { cont in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do { try p.run() } catch {
+                        cont.resume(returning: (-1, "error: could not start the engine: \(error.localizedDescription)"))
+                        return
+                    }
+                    if options.draft && engine.engine == .tectonic {
+                        inPipe.fileHandleForWriting.write(wrapper.data(using: .utf8)!)
+                        try? inPipe.fileHandleForWriting.close()
+                    }
+                    // Drain both pipes so a chatty engine can't block on a full pipe buffer.
+                    var errData = Data()
+                    let group = DispatchGroup()
+                    group.enter()
+                    DispatchQueue.global().async { errData = errPipe.fileHandleForReading.readDataToEndOfFile(); group.leave() }
+                    let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+                    group.wait()
+                    p.waitUntilExit()
+                    var text = String(data: errData, encoding: .utf8) ?? ""
+                    if engine.engine == .latexmk { text += "\n" + (String(data: outData, encoding: .utf8) ?? "") }
+                    cont.resume(returning: (p.terminationStatus, text))
                 }
-                // Drain both pipes so a chatty engine can't block on a full pipe buffer.
-                var errData = Data()
-                let group = DispatchGroup()
-                group.enter()
-                DispatchQueue.global().async { errData = errPipe.fileHandleForReading.readDataToEndOfFile(); group.leave() }
-                let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-                group.wait()
-                p.waitUntilExit()
-                var text = String(data: errData, encoding: .utf8) ?? ""
-                if engine.engine == .latexmk { text += "\n" + (String(data: outData, encoding: .utf8) ?? "") }
-                cont.resume(returning: (p.terminationStatus, text))
+            }
+            return (status, text, p.terminationReason == .uncaughtSignal)
+        }
+
+        var (status, stderrText, killed) = await run(arguments(cachedOnly: engine.engine == .tectonic))
+        if engine.engine == .tectonic, !killed, myGeneration == generation {
+            // Something wasn't downloaded yet (or the cache couldn't serve this document): go online once.
+            let pdfFresh = ((try? FileManager.default.attributesOfItem(atPath: outDir.appendingPathComponent("\(jobName).pdf").path))?[.modificationDate] as? Date).map { $0 >= start } ?? false
+            let missing = stderrText.contains("not found.")
+            if missing || (status != 0 && !pdfFresh) {
+                (status, stderrText, killed) = await run(arguments(cachedOnly: false))
+                if stderrText.lowercased().contains("failed to") && (stderrText.contains("http") || stderrText.lowercased().contains("network") || stderrText.lowercased().contains("connect")) {
+                    stderrText = "error: This document needs a package that hasn't been downloaded yet, and you're offline. Connect to the internet once and compile again.\n" + stderrText
+                }
             }
         }
         let duration = Date().timeIntervalSince(start)
-        if myGeneration != generation || p.terminationReason == .uncaughtSignal {
+        if myGeneration != generation || killed {
             return CompileResult(pdf: nil, synctex: nil, issues: [], duration: duration, exitCode: status, cancelled: true, log: "", stderr: stderrText)
         }
         process = nil
@@ -142,6 +188,8 @@ final class CompileService {
         let synctex = await Task.detached { SyncTeX.load(url: outDir.appendingPathComponent("\(jobName).synctex.gz")) }.value
         let mainRel = main.path.hasPrefix(root.path + "/") ? String(main.path.dropFirst(root.path.count + 1)) : main.lastPathComponent
         var issues = LogParser.parse(stderr: stderrText, log: log, mainFile: mainRel)
+        // In draft mode the job is "texput"; its messages belong to the main file.
+        if jobName == "texput" { issues = issues.map { var i = $0; if i.file == "texput" || i.file == "texput.tex" { i.file = nil }; return i } }
         // Paths in messages are relative to the main file's folder; make them project-relative.
         let mainDir = main.deletingLastPathComponent()
         issues = issues.map { i in

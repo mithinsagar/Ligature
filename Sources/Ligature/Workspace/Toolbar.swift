@@ -140,6 +140,18 @@ struct CompilePill: View {
                 Toggle("Live Compile", isOn: Binding(get: { Preferences.shared.liveCompile }, set: { model.setLiveCompile($0) }))
                 Toggle("PDF Follows Caret", isOn: Binding(get: { Preferences.shared.followCaret }, set: { Preferences.shared.followCaret = $0 }))
                 Divider()
+                Section("Speed") {
+                    Toggle("Draft Mode (Skip Images)", isOn: Binding(get: { Preferences.shared.draftMode }, set: { Preferences.shared.draftMode = $0; model.compile(manual: true) }))
+                }
+                Section("On Errors") {
+                    Picker("On Errors", selection: Binding(get: { Preferences.shared.stopOnFirstError }, set: { Preferences.shared.stopOnFirstError = $0; model.compile(manual: true) })) {
+                        Text("Try to Compile Despite Errors").tag(false)
+                        Text("Stop on First Error").tag(true)
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                }
+                Divider()
                 Menu("Main File") {
                     ForEach(model.texFiles, id: \.self) { f in
                         Button { model.mainFile = f } label: {
@@ -149,11 +161,9 @@ struct CompilePill: View {
                 }
                 Divider()
                 if let e = model.engine { Text(e.version.isEmpty ? e.engine.title : e.version) }
+                Button("Logs and Output Files") { withAnimation(.panel) { model.showLogs = true } }
                 Button("Reveal Build Folder") { NSWorkspace.shared.activateFileViewerSelecting([BuildPaths.directory(for: model.root)]) }
-                Button("Clean Build and Compile") {
-                    try? FileManager.default.removeItem(at: BuildPaths.directory(for: model.root))
-                    model.compile(manual: true)
-                }
+                Button("Recompile from Scratch") { model.recompileFromScratch() }
             } label: {
                 Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
                     .foregroundStyle(Color(theme.secondary))
@@ -296,6 +306,8 @@ struct ExportMenu: View {
             Button { exportPDF() } label: { Label("Download PDF…", systemImage: "arrow.down.doc") }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
             Button { exportWord() } label: { Label("Download as Word (.docx)…", systemImage: "doc.text") }
+            Button { exportDocument(.markdown) } label: { Label("Download as Markdown (.md)…", systemImage: "text.alignleft") }
+            Button { exportDocument(.html) } label: { Label("Download as Web Page (.html)…", systemImage: "globe") }
             if let url = sharedPDFURL() {
                 ShareLink(item: url) { Label("Share PDF…", systemImage: "square.and.arrow.up") }
             }
@@ -340,10 +352,14 @@ struct ExportMenu: View {
         }
     }
 
-    func exportWord() {
+    func exportWord() { exportDocument(.docx) }
+
+    /// Word, Markdown or HTML through pandoc.
+    func exportDocument(_ format: WordExporter.Format) {
+        let ext = ["docx": "docx", "markdown": "md", "html": "html"][format.rawValue]!
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [UTType(filenameExtension: "docx") ?? .data]
-        panel.nameFieldStringValue = "\(model.exportBaseName).docx"
+        panel.allowedContentTypes = [UTType(filenameExtension: ext) ?? .data]
+        panel.nameFieldStringValue = "\(model.exportBaseName).\(ext)"
         panel.isExtensionHidden = false
         panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -351,8 +367,8 @@ struct ExportMenu: View {
         let bibs = FileNode.flatten(model.tree).filter { $0.name.hasSuffix(".bib") }.map(\.path)
         do {
             try? FileManager.default.removeItem(at: url)
-            try WordExporter.export(root: model.root, main: model.mainFile, bibFiles: bibs, to: url)
-            model.recordDownload(.word, to: url)
+            try WordExporter.export(root: model.root, main: model.mainFile, bibFiles: bibs, to: url, format: format)
+            model.recordDownload(format == .docx ? .word : (format == .html ? .html : .markdown), to: url)
             model.showToast("doc.text.fill", "Saved \(url.lastPathComponent)", actionTitle: "Open") { NSWorkspace.shared.open(url) }
         } catch {
             model.showToast("exclamationmark.triangle.fill", error.localizedDescription, tint: Color(theme.error))

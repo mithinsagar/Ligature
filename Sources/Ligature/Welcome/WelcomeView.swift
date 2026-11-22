@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import PDFKit
 
 struct WelcomeView: View {
     @Environment(\.openWindow) private var openWindow
@@ -7,6 +8,8 @@ struct WelcomeView: View {
     @State private var mode: Mode = .home
     @State private var engine: EngineLocator.Found?
     @State private var checkedEngine = false
+    /// The recent project being peeked at, and where its row sits in the window.
+    @State private var peek: RecentPeekTarget?
     private var recents: Recents { Recents.shared }
 
     enum Mode { case home, templates }
@@ -19,7 +22,7 @@ struct WelcomeView: View {
             Rectangle().fill(Color(theme.hairline)).frame(width: 0.5)
             ZStack {
                 if mode == .home {
-                    RecentList(open: open)
+                    RecentList(open: open, peek: $peek)
                         .transition(.asymmetric(insertion: .move(edge: .leading).combined(with: .opacity), removal: .move(edge: .leading).combined(with: .opacity)))
                 } else {
                     TemplateGallery(back: { withAnimation(.panel) { mode = .home } }, created: { url in open(url) })
@@ -31,6 +34,9 @@ struct WelcomeView: View {
             .clipped()
         }
         .frame(width: 940, height: 600)
+        .coordinateSpace(name: RecentPeekTarget.space)
+        .overlay(alignment: .topLeading) { peekCard }
+        .onChange(of: mode) { _, _ in peek = nil }
         .preferredColorScheme(Preferences.shared.themeID == "auto" ? nil : (theme.isDark ? .dark : .light))
         .tint(accent)
         .onAppear {
@@ -61,6 +67,7 @@ struct WelcomeView: View {
                     withAnimation(.panel) { mode = .templates }
                 }
                 WelcomeAction(symbol: "folder", title: "Open…", detail: "A project folder or .tex file", shortcut: "⌘O") { openPanel() }
+                WelcomeAction(symbol: "square.and.arrow.down.on.square", title: "Import…", detail: "A .zip, Word or Markdown file", shortcut: "⇧⌘I") { importPanel() }
             }
             .padding(.top, 34)
 
@@ -81,9 +88,38 @@ struct WelcomeView: View {
         .padding(.horizontal, 30)
     }
 
+    /// The peek floats over the left column, level with the hovered row, inside this window (a popover is a
+    /// separate window and could take the hover away from the row). It never takes clicks or hover itself.
+    @ViewBuilder var peekCard: some View {
+        if let peek {
+            let size = CGSize(width: 248, height: 372)
+            let y = min(max(peek.rowFrame.midY - size.height / 2, 14), 600 - size.height - 14)
+            RecentPeek(item: peek.item)
+                .id(peek.item.id)
+                .frame(width: size.width, height: size.height, alignment: .top)
+                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .shadow(color: .black.opacity(theme.isDark ? 0.45 : 0.16), radius: 24, y: 10)
+                .offset(x: 300 - size.width - 18, y: y)
+                .allowsHitTesting(false)
+                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .trailing)))
+        }
+    }
+
     func open(_ url: URL) {
+        peek = nil
         openWindow(id: "project", value: url)
         dismissWindow(id: "welcome")
+    }
+
+    func importPanel() {
+        let p = NSOpenPanel()
+        p.allowedContentTypes = ["zip", "docx", "md", "markdown", "odt", "rtf", "html"].compactMap { UTType(filenameExtension: $0) }
+        p.prompt = "Import"
+        p.message = "Choose a .zip project (e.g. from Overleaf), a Word document or a Markdown file"
+        guard p.runModal() == .OK, let u = p.url else { return }
+        do { open(try ProjectImporter.importFile(u)) } catch {
+            let a = NSAlert(); a.messageText = "Couldn't import \(u.lastPathComponent)"; a.informativeText = error.localizedDescription; a.runModal()
+        }
     }
 
     func openPanel() {
@@ -149,7 +185,7 @@ private struct WelcomeAction: View {
             .scaleEffect(hovering ? 1.01 : 1)
         }
         .buttonStyle(PressableStyle())
-        .keyboardShortcut(shortcut == "⌘N" ? "n" : "o", modifiers: .command)
+        .keyboardShortcut(shortcut == "⌘N" ? "n" : (shortcut == "⌘O" ? "o" : "i"), modifiers: shortcut == "⇧⌘I" ? [.command, .shift] : .command)
         .onHover { h in withAnimation(.hover) { hovering = h } }
     }
 }
@@ -162,8 +198,15 @@ struct PressableStyle: ButtonStyle {
     }
 }
 
+struct RecentPeekTarget: Equatable {
+    static let space = "welcome"
+    var item: RecentProject
+    var rowFrame: CGRect
+}
+
 private struct RecentList: View {
     let open: (URL) -> Void
+    @Binding var peek: RecentPeekTarget?
     private var recents: Recents { Recents.shared }
 
     var body: some View {
@@ -177,8 +220,8 @@ private struct RecentList: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 2) {
-                        ForEach(recents.items) { item in
-                            RecentRow(item: item, open: { open(item.url) }, remove: { withAnimation(.panel) { recents.remove(item) } })
+                        ForEach(Array(recents.items.enumerated()), id: \.element.id) { index, item in
+                            RecentRow(item: item, index: index, peek: $peek, open: { open(item.url) }, remove: { withAnimation(.panel) { peek = nil; recents.remove(item) } })
                         }
                     }
                     .padding(.horizontal, 14).padding(.bottom, 16)
@@ -190,9 +233,17 @@ private struct RecentList: View {
 
 private struct RecentRow: View {
     let item: RecentProject
+    let index: Int
+    @Binding var peek: RecentPeekTarget?
     let open: () -> Void
     let remove: () -> Void
     @State private var hovering = false
+    @State private var peekTask: Task<Void, Never>?
+    @State private var frame: CGRect = .zero
+
+    func showPeek() {
+        withAnimation(.spring(duration: 0.28, bounce: 0.12)) { peek = RecentPeekTarget(item: item, rowFrame: frame) }
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -217,13 +268,126 @@ private struct RecentRow: View {
         }
         .padding(.horizontal, 10).padding(.vertical, 8)
         .hoverRow(cornerRadius: 10)
-        .onHover { h in withAnimation(.hover) { hovering = h } }
-        .onTapGesture { open() }
+        .onHover { h in
+            withAnimation(.hover) { hovering = h }
+            // Resting on a row for a moment peeks at its last compiled page; leaving it hides the peek at once.
+            peekTask?.cancel()
+            if h {
+                peekTask = Task {
+                    try? await Task.sleep(for: .milliseconds(650))
+                    if !Task.isCancelled { showPeek() }
+                }
+            } else if peek?.item == item {
+                withAnimation(.easeOut(duration: 0.12)) { peek = nil }
+            }
+        }
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(RecentPeekTarget.space)) } action: { f in
+            frame = f
+            if peek?.item == item { peek?.rowFrame = f }  // follow scrolling
+        }
+        .onTapGesture { peekTask?.cancel(); peek = nil; open() }
+        .onReceive(NotificationCenter.default.publisher(for: .init("LigaturePeekRecent"))) { n in
+            if n.object as? Int == index { showPeek() }  // test hook
+        }
         .contextMenu {
             Button("Open") { open() }
             Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
             Button("Remove from List", action: remove)
         }
+    }
+}
+
+/// The hover peek for a recent project: the first page of its last compiled PDF, with when it was built.
+private struct RecentPeek: View {
+    let item: RecentProject
+    @State private var info: RecentPreview.Info?
+    @State private var loaded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ZStack {
+                if let info {
+                    Image(nsImage: info.image)
+                        .resizable()
+                        .interpolation(.high)
+                        .aspectRatio(contentMode: .fit)
+                        .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                        .shadow(color: .black.opacity(theme.isDark ? 0.5 : 0.18), radius: 8, y: 3)
+                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                } else if loaded {
+                    VStack(spacing: 8) {
+                        Image(systemName: "doc.text.magnifyingglass").font(.system(size: 26, weight: .light))
+                        Text("Not compiled yet").font(.system(size: 12, weight: .medium))
+                        Text("Open it and press Compile to see a preview here.").font(.system(size: 11)).multilineTextAlignment(.center)
+                    }
+                    .foregroundStyle(Color(theme.secondary))
+                    .padding(.horizontal, 18)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            .frame(width: 220, height: 285)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.name).font(.system(size: 13, weight: .semibold)).foregroundStyle(Color(theme.text)).lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(item.mainFile ?? "main.tex").lineLimit(1).truncationMode(.middle)
+                    if let info {
+                        Text("·")
+                        Text(info.pages == 1 ? "1 page" : "\(info.pages) pages")
+                    }
+                }
+                .font(.system(size: 11)).foregroundStyle(Color(theme.secondary))
+                if let info {
+                    Text("Compiled \(info.compiled, format: .relative(presentation: .named))")
+                        .font(.system(size: 11)).foregroundStyle(Color(theme.secondary))
+                }
+            }
+            .frame(width: 220, alignment: .leading)
+        }
+        .padding(14)
+        .task {
+            let found = await RecentPreview.load(item)
+            withAnimation(.easeOut(duration: 0.18)) { info = found; loaded = true }
+        }
+    }
+}
+
+/// Finds and renders the last PDF a recent project compiled to, cached by file date so repeat peeks are instant.
+@MainActor
+enum RecentPreview {
+    struct Info { let image: NSImage; let pages: Int; let compiled: Date }
+    private static var cache: [String: (date: Date, info: Info)] = [:]
+
+    static func pdfURL(for item: RecentProject) -> URL? {
+        let dir = BuildPaths.location(for: item.url)
+        let job = ((item.mainFile ?? "main.tex") as NSString).lastPathComponent
+        let named = dir.appendingPathComponent((job as NSString).deletingPathExtension + ".pdf")
+        if FileManager.default.fileExists(atPath: named.path) { return named }
+        // The main file may have been renamed since; fall back to the newest PDF in the build folder.
+        let pdfs = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey]))?
+            .filter { $0.pathExtension == "pdf" } ?? []
+        return pdfs.max { modified($0) < modified($1) }
+    }
+
+    static func load(_ item: RecentProject) async -> Info? {
+        guard let url = pdfURL(for: item) else { return nil }
+        let date = modified(url)
+        if let hit = cache[url.path], hit.date == date { return hit.info }
+        let rendered: (Data, Int)? = await Task.detached(priority: .userInitiated) {
+            guard let doc = PDFDocument(url: url), let page = doc.page(at: 0) else { return nil }
+            let thumb = page.thumbnail(of: NSSize(width: 440, height: 570), for: .cropBox)
+            guard let tiff = thumb.tiffRepresentation else { return nil }
+            return (tiff, doc.pageCount)
+        }.value
+        guard let (tiff, pages) = rendered, let image = NSImage(data: tiff) else { return nil }
+        let info = Info(image: image, pages: pages, compiled: date)
+        cache[url.path] = (date, info)
+        return info
+    }
+
+    private nonisolated static func modified(_ url: URL) -> Date {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
     }
 }
 

@@ -77,7 +77,63 @@ struct Theme: Identifiable, Equatable {
         reference: hex(0xA4561B), heading: hex(0x2A2015), special: hex(0xB4441B),
         error: hex(0xC0392B), warning: hex(0xA66A00))
 
-    static let all: [Theme] = [paper, mist, sepia, graphite, midnight]
+    static let solarizedLight = Theme(
+        id: "solarized-light", name: "Solarized Light", isDark: false,
+        canvas: hex(0xEEE8D5), surface: hex(0xFDF6E3), editor: hex(0xFDF6E3), gutter: hex(0xFDF6E3), gutterText: hex(0x93A1A1),
+        currentLine: hex(0x073642, 0.05), selection: hex(0x268BD2, 0.2), text: hex(0x586E75), secondary: hex(0x839496), hairline: hex(0x073642, 0.1),
+        command: hex(0x268BD2), environment: hex(0x6C71C4), math: hex(0x859900), comment: hex(0x93A1A1), brace: hex(0x93A1A1),
+        reference: hex(0xCB4B16), heading: hex(0x073642), special: hex(0xD33682),
+        error: hex(0xDC322F), warning: hex(0xB58900))
+
+    static let solarizedDark = Theme(
+        id: "solarized-dark", name: "Solarized Dark", isDark: true,
+        canvas: hex(0x00212B), surface: hex(0x073642), editor: hex(0x002B36), gutter: hex(0x002B36), gutterText: hex(0x4F6A72),
+        currentLine: hex(0xFDF6E3, 0.04), selection: hex(0x268BD2, 0.3), text: hex(0x93A1A1), secondary: hex(0x657B83), hairline: hex(0xFDF6E3, 0.08),
+        command: hex(0x268BD2), environment: hex(0x6C71C4), math: hex(0x859900), comment: hex(0x586E75), brace: hex(0x657B83),
+        reference: hex(0xCB4B16), heading: hex(0xEEE8D5), special: hex(0xD33682),
+        error: hex(0xDC322F), warning: hex(0xB58900))
+
+    static let nord = Theme(
+        id: "nord", name: "Nord", isDark: true,
+        canvas: hex(0x242933), surface: hex(0x3B4252), editor: hex(0x2E3440), gutter: hex(0x2E3440), gutterText: hex(0x616E88),
+        currentLine: hex(0xECEFF4, 0.04), selection: hex(0x88C0D0, 0.25), text: hex(0xD8DEE9), secondary: hex(0x9AA5B9), hairline: hex(0xECEFF4, 0.08),
+        command: hex(0x81A1C1), environment: hex(0xB48EAD), math: hex(0xA3BE8C), comment: hex(0x616E88), brace: hex(0x8FBCBB),
+        reference: hex(0xEBCB8B), heading: hex(0xECEFF4), special: hex(0xD08770),
+        error: hex(0xBF616A), warning: hex(0xEBCB8B))
+
+    static let dracula = Theme(
+        id: "dracula", name: "Dracula", isDark: true,
+        canvas: hex(0x1E1F29), surface: hex(0x343746), editor: hex(0x282A36), gutter: hex(0x282A36), gutterText: hex(0x6272A4),
+        currentLine: hex(0xF8F8F2, 0.04), selection: hex(0xBD93F9, 0.28), text: hex(0xF8F8F2), secondary: hex(0xA4A9C4), hairline: hex(0xF8F8F2, 0.08),
+        command: hex(0x8BE9FD), environment: hex(0xFF79C6), math: hex(0x50FA7B), comment: hex(0x6272A4), brace: hex(0xBD93F9),
+        reference: hex(0xF1FA8C), heading: hex(0xFFFFFF), special: hex(0xFFB86C),
+        error: hex(0xFF5555), warning: hex(0xF1FA8C))
+
+    static let oneDark = Theme(
+        id: "one-dark", name: "One Dark", isDark: true,
+        canvas: hex(0x1E2127), surface: hex(0x2C313A), editor: hex(0x282C34), gutter: hex(0x282C34), gutterText: hex(0x5C6370),
+        currentLine: hex(0xFFFFFF, 0.04), selection: hex(0x61AFEF, 0.25), text: hex(0xABB2BF), secondary: hex(0x8A919E), hairline: hex(0xFFFFFF, 0.07),
+        command: hex(0x61AFEF), environment: hex(0xC678DD), math: hex(0x98C379), comment: hex(0x5C6370), brace: hex(0x56B6C2),
+        reference: hex(0xE5C07B), heading: hex(0xE6E6E6), special: hex(0xD19A66),
+        error: hex(0xE06C75), warning: hex(0xE5C07B))
+
+    static let github = Theme(
+        id: "github", name: "GitHub Light", isDark: false,
+        canvas: hex(0xF0F2F4), surface: hex(0xFFFFFF), editor: hex(0xFFFFFF), gutter: hex(0xFFFFFF), gutterText: hex(0x8C959F),
+        currentLine: hex(0x0969DA, 0.04), selection: hex(0x0969DA, 0.15), text: hex(0x1F2328), secondary: hex(0x656D76), hairline: hex(0x1F2328, 0.1),
+        command: hex(0x0550AE), environment: hex(0x8250DF), math: hex(0x116329), comment: hex(0x6E7781), brace: hex(0x6E7781),
+        reference: hex(0x953800), heading: hex(0x1F2328), special: hex(0xCF222E),
+        error: hex(0xCF222E), warning: hex(0x9A6700))
+
+    static let gruvbox = Theme(
+        id: "gruvbox", name: "Gruvbox", isDark: true,
+        canvas: hex(0x1D2021), surface: hex(0x3C3836), editor: hex(0x282828), gutter: hex(0x282828), gutterText: hex(0x7C6F64),
+        currentLine: hex(0xEBDBB2, 0.04), selection: hex(0xD79921, 0.25), text: hex(0xEBDBB2), secondary: hex(0xA89984), hairline: hex(0xEBDBB2, 0.08),
+        command: hex(0x83A598), environment: hex(0xD3869B), math: hex(0xB8BB26), comment: hex(0x928374), brace: hex(0x8EC07C),
+        reference: hex(0xFABD2F), heading: hex(0xFBF1C7), special: hex(0xFE8019),
+        error: hex(0xFB4934), warning: hex(0xFABD2F))
+
+    static let all: [Theme] = [paper, mist, sepia, github, solarizedLight, graphite, midnight, solarizedDark, nord, dracula, oneDark, gruvbox]
 }
 
 /// Accent colours offered in Settings.
@@ -138,7 +194,22 @@ extension Color {
 
 /// Typography in one place.
 enum Typo {
-    static func editorFont(size: CGFloat) -> NSFont { .monospacedSystemFont(ofSize: size, weight: .regular) }
-    static func editorBold(size: CGFloat) -> NSFont { .monospacedSystemFont(ofSize: size, weight: .semibold) }
+    /// The chosen editor font family ("" = system monospaced). Set from Preferences.
+    nonisolated(unsafe) static var fontName = ""
+
+    static func editorFont(size: CGFloat) -> NSFont {
+        if !fontName.isEmpty, let f = NSFontManager.shared.font(withFamily: fontName, traits: [], weight: 5, size: size) { return f }
+        return .monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+    static func editorBold(size: CGFloat) -> NSFont {
+        if !fontName.isEmpty, let f = NSFontManager.shared.font(withFamily: fontName, traits: .boldFontMask, weight: 9, size: size) { return f }
+        return .monospacedSystemFont(ofSize: size, weight: .semibold)
+    }
+    /// Monospaced families installed on this Mac that read well as an editor font.
+    static func availableFamilies() -> [String] {
+        let preferred = ["SF Mono", "Menlo", "Monaco", "JetBrains Mono", "Fira Code", "Source Code Pro", "IBM Plex Mono", "Cascadia Code", "Hack", "Iosevka", "Courier New", "OpenDyslexic Mono", "OpenDyslexicMono", "OpenDyslexic"]
+        let installed = Set(NSFontManager.shared.availableFontFamilies)
+        return preferred.filter { installed.contains($0) }
+    }
     static let serifTitle = Font.system(size: 30, weight: .semibold, design: .serif)
 }

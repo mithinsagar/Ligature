@@ -240,4 +240,55 @@ public enum LaTeXText {
         let end = r.location == NSNotFound ? text.length : r.location
         return NSRange(location: start, length: end - start)
     }
+
+    // MARK: Plain text
+
+    /// Readable text from a short piece of LaTeX (a caption, a table cell, a title): formatting commands keep their
+    /// argument, references become their key, other commands and braces disappear, `~` and `\\` become spaces.
+    public static func plainText(_ latex: String) -> String {
+        var s = latex
+        s = s.replacingOccurrences(of: #"(?<!\\)%.*"#, with: "", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"\\(?:label|index|footnote|thanks|vspace|hspace|phantom)\*?\{[^{}]*\}"#, with: "", options: .regularExpression)
+        // Formatting commands with one argument: keep the argument (repeat for nesting).
+        for _ in 0..<3 {
+            s = s.replacingOccurrences(of: #"\\(?:textbf|textit|emph|underline|texttt|textsc|textsf|textrm|textup|mbox|text|mathrm|mathbf|mathit|url|textsuperscript|textsubscript)\{([^{}]*)\}"#, with: "$1", options: .regularExpression)
+        }
+        s = s.replacingOccurrences(of: #"\\href\{[^{}]*\}\{([^{}]*)\}"#, with: "$1", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"\\(?:ref|eqref|cref|Cref|autoref|pageref|cite|citep|citet|parencite|textcite|autocite)\*?(?:\[[^\]]*\])*\{([^{}]*)\}"#, with: "[$1]", options: .regularExpression)
+        // In order: "---" must become an em dash before "--" becomes an en dash.
+        let named: [(String, String)] = [("\\LaTeX", "LaTeX"), ("\\TeX", "TeX"), ("\\ldots", "…"), ("\\dots", "…"), ("\\&", "&"), ("\\%", "%"), ("\\$", "$"), ("\\#", "#"), ("\\_", "_"), ("\\{", "{"), ("\\}", "}"), ("---", "—"), ("--", "–"), ("``", "\u{201C}"), ("''", "\u{201D}")]
+        for (k, v) in named { s = s.replacingOccurrences(of: k, with: v) }
+        s = s.replacingOccurrences(of: #"\\\\(\[[^\]]*\])?"#, with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: "~", with: " ")
+        s = s.replacingOccurrences(of: #"\\[A-Za-z@]+\*?(\[[^\]]*\])?"#, with: "", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"(?<!\\)[{}]"#, with: "", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        return s.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// The argument of the first `\name{…}` in `text`, with nested braces, or nil.
+    public static func argument(of name: String, in text: String) -> String? {
+        let ns = text as NSString
+        let r = ns.range(of: "\\" + name + "{")
+        guard r.location != NSNotFound else {
+            // Allow an optional argument: \caption[short]{long}
+            guard let m = try? NSRegularExpression(pattern: "\\\\" + name + #"\*?(?:\[[^\]]*\])?\{"#).firstMatch(in: text, range: NSRange(location: 0, length: ns.length)) else { return nil }
+            return balanced(from: NSMaxRange(m.range), in: ns)
+        }
+        return balanced(from: NSMaxRange(r), in: ns)
+    }
+
+    /// Text from `start` up to the brace that closes the one just before it.
+    public static func balanced(from start: Int, in ns: NSString) -> String? {
+        var depth = 1
+        var i = start
+        while i < ns.length {
+            let c = ns.character(at: i)
+            if c == 92 { i += 2; continue }
+            if c == 123 { depth += 1 } else if c == 125 { depth -= 1; if depth == 0 { return ns.substring(with: NSRange(location: start, length: i - start)) } }
+            i += 1
+        }
+        return nil
+    }
+
 }

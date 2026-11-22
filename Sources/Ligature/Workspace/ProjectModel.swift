@@ -13,6 +13,7 @@ import LigatureCore
     func caretRect() -> NSRect?
     func caretInMath() -> Bool
     func highlightWord(_ word: String, nearLine line: Int)
+    func fold(_ action: EditorController.FoldAction)
 }
 
 /// What the PDF preview exposes.
@@ -22,26 +23,32 @@ import LigatureCore
 }
 
 enum SidebarTab: String, CaseIterable, Identifiable {
-    case files, outline, issues, symbols, citations, history
+    case files, search, outline, issues, review, symbols, citations, history, git
     var id: String { rawValue }
     var symbol: String {
         switch self {
         case .files: "folder"
+        case .search: "magnifyingglass"
+        case .review: "text.bubble"
         case .outline: "list.bullet.indent"
         case .issues: "exclamationmark.triangle"
         case .symbols: "sum"
         case .citations: "quote.opening"
         case .history: "clock.arrow.trianglehead.counterclockwise.rotate.90"
+        case .git: "arrow.triangle.branch"
         }
     }
     var title: String {
         switch self {
         case .files: "Files"
+        case .search: "Search"
+        case .review: "Comments"
         case .outline: "Outline"
         case .issues: "Issues"
         case .symbols: "Symbols"
         case .citations: "Citations"
         case .history: "History"
+        case .git: "Git"
         }
     }
 }
@@ -93,6 +100,18 @@ final class ProjectModel {
     var movedTo: URL?
     var downloads: [DownloadRecord] = []
     var showDownloads = false
+    /// The logs pane over the PDF, and the last compile's raw output for it.
+    var showLogs = false
+    /// The PDF lives in its own window; the project window shows just the editor.
+    var pdfDetached = false
+    /// Focus mode: no sidebar, toolbar, tabs or status bar, just the writing and the PDF.
+    var focusMode = false
+    /// The Vim mode shown in the status bar ("NORMAL", "INSERT"…), or nil without Vim keybindings.
+    var vimMode: String?
+    /// The PDF page on screen (for presenting from the current page).
+    var visiblePage = 1
+    var lastLog = ""
+    var lastStderr = ""
     var toast: Toast?
 
     struct Toast: Equatable, Identifiable {
@@ -104,6 +123,9 @@ final class ProjectModel {
         var action: (() -> Void)? = nil
         static func == (a: Toast, b: Toast) -> Bool { a.id == b.id }
     }
+
+    /// The project's Git repository (if it has one).
+    @ObservationIgnored lazy var git = GitRepo(root: root)
 
     weak var editor: EditorControlling?
     weak var pdf: PDFControlling?
@@ -140,6 +162,7 @@ final class ProjectModel {
         open(path: mainFile)
         refreshStructure()
         snapshots = HistoryStore.list(root: self.root)
+        comments = CommentStore.load(root: self.root)
         downloads = DownloadStore.list(root: self.root)
         compile(manual: false)
     }
@@ -182,6 +205,9 @@ final class ProjectModel {
             return nil
         }
         guard let doc = try? TextDocument(url: url, relativePath: rel) else { return nil }
+        doc.project = self
+        anchorComments(in: doc)
+        if Preferences.shared.visualMode && doc.kind == .tex { doc.rehighlight() }
         doc.onChange = { [weak self] d in self?.documentDidChange(d) }
         doc.onUndoChange = { [weak self] in self?.undoTick += 1; self?.refreshDirty() }
         openDocs.append(doc)
@@ -190,9 +216,33 @@ final class ProjectModel {
         return doc
     }
 
+    /// Opens a file as a document without switching to it (for project-wide replace).
+    func ensureOpen(path: String) -> TextDocument? {
+        if let d = openDocs.first(where: { $0.relativePath == path }) { return d }
+        let url = root.appendingPathComponent(path)
+        guard let doc = try? TextDocument(url: url, relativePath: path) else { return nil }
+        doc.project = self
+        anchorComments(in: doc)
+        doc.onChange = { [weak self] d in self?.documentDidChange(d) }
+        doc.onUndoChange = { [weak self] in self?.undoTick += 1; self?.refreshDirty() }
+        openDocs.append(doc)
+        return doc
+    }
+
+    /// Project search: what's typed, and how it matches. Kept here so switching tabs doesn't lose it.
+    var searchQuery = ""
+    var replaceText = ""
+    var searchOptions = ProjectSearch.Options()
+
+    /// Every text file worth searching (TeX, bib, styles, plain text).
+    var searchableFiles: [String] {
+        FileNode.flatten(tree).filter { !$0.isDirectory && $0.isText }.map(\.path)
+    }
+
     func activate(_ doc: TextDocument) {
         guard activeDoc !== doc else { return }
         withAnimation(.panel) { activeDoc = doc }
+        lint(doc)
     }
 
     func close(_ doc: TextDocument) {
@@ -242,7 +292,99 @@ final class ProjectModel {
         guard movedTo == nil else { return }  // the files live somewhere else now
         for d in openDocs { d.save() }
         refreshDirty()
+        persistComments()
     }
+
+    // MARK: Comments
+
+    var comments: [Comment] = []
+    /// Text selected for a new comment (shows the composer in the Comments panel).
+    var commentDraft: (file: String, range: NSRange, quote: String)?
+    /// The comment whose text is highlighted strongly in the editor (hovered or selected in the panel).
+    var focusedComment: UUID?
+    var openCommentCount: Int { comments.filter { !$0.resolved }.count }
+
+    static var userName: String { NSFullUserName().isEmpty ? NSUserName() : NSFullUserName() }
+
+    /// Starts a comment on the editor's selection.
+    func beginComment() {
+        guard let doc = activeDoc, let ed = editor as? EditorController else { return }
+        let r = ed.selectionRange
+        guard r.length > 0 else { showToast("text.bubble", "Select some text to comment on"); return }
+        commentDraft = (doc.relativePath, r, (doc.text as NSString).substring(with: r))
+        sidebarTab = .review
+        showSidebar = true
+    }
+
+    func addComment(_ text: String) {
+        guard let d = commentDraft, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { commentDraft = nil; return }
+        let c = Comment(file: d.file, location: d.range.location, length: d.range.length, quote: d.quote, author: Self.userName, date: Date(), text: text)
+        comments.append(c)
+        if let doc = openDocs.first(where: { $0.relativePath == d.file }) { CommentAnchors.set(c.id, d.range, in: doc.storage) }
+        commentDraft = nil
+        persistComments()
+        redrawEditor()
+    }
+
+    func reply(to id: UUID, _ text: String) {
+        guard let i = comments.firstIndex(where: { $0.id == id }), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        comments[i].replies.append(Comment.Reply(author: Self.userName, date: Date(), text: text))
+        persistComments()
+    }
+
+    func setResolved(_ id: UUID, _ resolved: Bool) {
+        guard let i = comments.firstIndex(where: { $0.id == id }) else { return }
+        comments[i].resolved = resolved
+        persistComments()
+        redrawEditor()
+    }
+
+    func editComment(_ id: UUID, text: String) {
+        guard let i = comments.firstIndex(where: { $0.id == id }) else { return }
+        comments[i].text = text
+        persistComments()
+    }
+
+    func deleteComment(_ id: UUID) {
+        comments.removeAll { $0.id == id }
+        for d in openDocs { CommentAnchors.set(id, nil, in: d.storage) }
+        persistComments()
+        redrawEditor()
+    }
+
+    /// Selects a comment's text in the editor.
+    func reveal(_ c: Comment) {
+        guard let doc = open(path: c.file) else { return }
+        let r = CommentAnchors.all(doc.storage)[c.id] ?? NSRange(location: c.location, length: c.length)
+        guard NSMaxRange(r) <= doc.storage.length else { return }
+        DispatchQueue.main.async { (self.editor as? EditorController)?.select(r) }
+    }
+
+    /// Finds each comment's text in a freshly opened file.
+    private func anchorComments(in doc: TextDocument) {
+        for (i, c) in comments.enumerated() where c.file == doc.relativePath {
+            let r = CommentStore.locate(c, in: doc.text)
+            CommentAnchors.set(c.id, r, in: doc.storage)
+            comments[i].orphaned = r == nil
+        }
+    }
+
+    /// Writes comments with their current positions.
+    func persistComments() {
+        for (i, c) in comments.enumerated() {
+            guard let doc = openDocs.first(where: { $0.relativePath == c.file }) else { continue }
+            if let r = CommentAnchors.all(doc.storage)[c.id] {
+                if r.length == 0 { comments[i].orphaned = true; continue }
+                comments[i].location = r.location
+                comments[i].length = r.length
+                comments[i].quote = (doc.text as NSString).substring(with: r)
+                comments[i].orphaned = false
+            }
+        }
+        CommentStore.save(comments, root: root)
+    }
+
+    private func redrawEditor() { (editor as? EditorController)?.textView.needsDisplay = true }
 
     /// Paths of open documents with edits not yet written to disk.
     var dirtyPaths: Set<String> = []
@@ -369,7 +511,8 @@ final class ProjectModel {
             self.compiler.cancel()
         }
         Task { @MainActor in
-            let result = await compiler.compile(engine: engine, main: mainURL, root: root)
+            let options = CompileService.Options(stopOnFirstError: Preferences.shared.stopOnFirstError, draft: Preferences.shared.draftMode)
+            let result = await compiler.compile(engine: engine, main: mainURL, root: root, options: options)
             self.compiling = false
             if !result.cancelled {
                 self.apply(result, manual: manual)
@@ -388,6 +531,8 @@ final class ProjectModel {
         NSLog("Ligature: compile done manual=\(manual) exit=\(result.exitCode) pdf=\(result.pdf?.count ?? 0) issues=\(result.issues.count) %.2fs", result.duration)
         lastDuration = result.duration
         lastCompiled = Date()
+        lastLog = result.log
+        lastStderr = result.stderr
         withAnimation(.panel) { issues = result.issues }
         if let pdf = result.pdf, !pdf.isEmpty {
             pdfData = pdf
@@ -408,6 +553,27 @@ final class ProjectModel {
         } else if ok {
             takeSnapshot()
         }
+    }
+
+    /// Files the last compile produced (log, aux, bbl, synctex…), newest first.
+    var outputFiles: [URL] {
+        let dir = BuildPaths.location(for: root)
+        let items = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles])) ?? []
+        return items.filter { !$0.hasDirectoryPath }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    /// Asks the on-device model for a fix to a compile error (see ErrorAssist).
+    func suggestFix(for issue: CompileIssue) {
+        errorAssistIssue = issue
+    }
+    /// The error Error Assist is working on (drives its sheet).
+    var errorAssistIssue: CompileIssue?
+
+    /// Deletes everything the engine cached for this project and compiles from scratch.
+    func recompileFromScratch() {
+        try? FileManager.default.removeItem(at: BuildPaths.location(for: root))
+        showToast("trash", "Cleared cached files. Compiling from scratch")
+        compile(manual: true)
     }
 
     func showToast(_ symbol: String, _ text: String, tint: Color? = nil, actionTitle: String? = nil, action: (() -> Void)? = nil) {
@@ -478,6 +644,35 @@ final class ProjectModel {
         let reachable = Set(items.map(\.file)).union([mainFile])
         words = reachable.reduce(0) { $0 + (text(of: $1).map(LaTeXText.wordCount) ?? 0) }
         updateCurrentSection()
+        if let activeDoc { lint(activeDoc) }
+    }
+
+    // MARK: Live checking
+
+    /// Problems the as-you-type checker found, by file.
+    var liveIssues: [String: [CompileIssue]] = [:]
+    private var lintTask: Task<Void, Never>?
+
+    /// Everything to show in the Issues list: live problems first (they reflect the text as it is now).
+    var allIssues: [CompileIssue] { liveIssues.keys.sorted().flatMap { liveIssues[$0] ?? [] } + issues }
+
+    /// Checks a file in the background with the project's labels, citations and packages.
+    func lint(_ doc: TextDocument) {
+        guard doc.kind == .tex else { return }
+        lintTask?.cancel()
+        let text = doc.text, path = doc.relativePath
+        var cites = Set(bibEntries.map(\.key))
+        let bibitem = try! NSRegularExpression(pattern: #"\\bibitem(?:\[[^\]]*\])?\{([^}]*)\}"#)
+        for f in texFiles { if let t = self.text(of: f) { for m in bibitem.matches(in: t, range: NSRange(location: 0, length: (t as NSString).length)) { cites.insert((t as NSString).substring(with: m.range(at: 1))) } } }
+        let hasBibliography = !cites.isEmpty || FileNode.flatten(tree).contains { $0.name.hasSuffix(".bib") }
+        let info = Linter.preambleInfo(self.text(of: mainFile) ?? "")
+        let ctx = Linter.Context(labels: Set(labels.map(\.title)), citations: hasBibliography ? cites : nil,
+                                 packages: info.packages, documentClass: info.documentClass, isMain: path == mainFile)
+        lintTask = Task { @MainActor in
+            let found = await Task.detached(priority: .utility) { Linter.check(text, file: path, context: ctx) }.value
+            guard !Task.isCancelled else { return }
+            if liveIssues[path] != found { liveIssues[path] = found }
+        }
     }
 
     func updateCurrentSection() {
@@ -499,6 +694,59 @@ final class ProjectModel {
         Task.detached(priority: .utility) {
             let snap = HistoryStore.save(root: root, files: files, words: words, latest: latest, pdf: pdf, pages: pages, errors: errors)
             if let snap { await MainActor.run { self.snapshots.insert(snap, at: 0) } }
+        }
+    }
+
+    /// Names a version so it's easy to find (and never pruned).
+    func label(_ snap: Snapshot, as label: String?) {
+        guard let updated = HistoryStore.setLabel(label, on: snap, root: root), let i = snapshots.firstIndex(where: { $0.id == snap.id }) else { return }
+        snapshots[i] = updated
+        if let label, !label.isEmpty { showToast("bookmark.fill", "Labelled “\(label)”") }
+    }
+
+    /// Saves the project as it is now as a named version.
+    func labelCurrentVersion(_ label: String) {
+        saveAll()
+        var files: [String: String] = [:]
+        for node in FileNode.flatten(tree) where !node.isDirectory {
+            let ext = (node.name as NSString).pathExtension.lowercased()
+            guard ["tex", "bib", "sty", "cls", "ltx"].contains(ext), let t = text(of: node.path) else { continue }
+            files[node.path] = t
+        }
+        if let latest = snapshots.first, latest.files == files {
+            self.label(latest, as: label)
+        } else if let snap = HistoryStore.save(root: root, files: files, words: words, note: label, latest: nil) {
+            snapshots.insert(snap, at: 0)
+            showToast("bookmark.fill", "Labelled “\(label)”")
+        }
+    }
+
+    /// Writes a zip of the project as it was at a version: that version's text files with today's images.
+    func downloadVersion(_ snap: Snapshot) {
+        let stamp = snap.note ?? snap.date.formatted(.dateTime.year().month().day().hour().minute())
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "\(name) – \(stamp.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: ".")).zip"
+        guard panel.runModal() == .OK, let dest = panel.url else { return }
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("ligature-version-\(UUID().uuidString)", isDirectory: true)
+        let folder = tmp.appendingPathComponent(name, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        do {
+            try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: root, to: folder)
+            for (path, content) in snap.files {
+                let u = folder.appendingPathComponent(path)
+                try? FileManager.default.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try content.write(to: u, atomically: true, encoding: .utf8)
+            }
+            try? FileManager.default.removeItem(at: dest)
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+            p.arguments = ["-c", "-k", "--keepParent", "--sequesterRsrc", folder.path, dest.path]
+            try p.run()
+            p.waitUntilExit()
+            showToast("archivebox.fill", "Saved \(dest.lastPathComponent)", actionTitle: "Show") { NSWorkspace.shared.activateFileViewerSelecting([dest]) }
+        } catch {
+            showToast("exclamationmark.triangle.fill", "Couldn't save the version: \(error.localizedDescription)", tint: Color(theme.error))
         }
     }
 

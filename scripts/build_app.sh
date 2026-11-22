@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 APP=build/Ligature.app
-VERSION="${LIGATURE_VERSION:-1.0.0}"
+VERSION="${LIGATURE_VERSION:-1.1.0}"
 swift build -c release --product Ligature
 BIN=$(swift build -c release --show-bin-path)
 rm -rf "$APP"

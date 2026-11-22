@@ -47,6 +47,15 @@ public enum ErrorAdvisor {
 
     public static func advise(_ issue: CompileIssue) -> Advice? {
         let m = issue.message
+        if issue.isLive {
+            // The live checker's messages are already plain English; a missing package can be fixed in one click.
+            if let r = m.range(of: #"\\usepackage\{([^}]+)\}"#, options: .regularExpression) {
+                let pkg = String(m[r]).replacingOccurrences(of: #"^\\usepackage\{|\}$"#, with: "", options: .regularExpression)
+                return Advice(title: m, explanation: "This comes from the \(pkg) package, which the preamble doesn't load yet.",
+                              fix: .addPackage(name: pkg, options: nil), fixLabel: "Add \\usepackage{\(pkg)}")
+            }
+            return nil
+        }
         let ctx = issue.context ?? ""
 
         if m.hasPrefix("Undefined control sequence") {

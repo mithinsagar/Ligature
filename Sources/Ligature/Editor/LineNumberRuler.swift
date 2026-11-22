@@ -11,6 +11,12 @@ final class LineNumberRuler: NSRulerView {
     private var cachedTextLength = -1
     /// Called when the gutter's width changes, so the scroll view can keep text clear of it.
     var onThicknessChange: ((CGFloat) -> Void)?
+    /// Foldable regions by the line they start on, whether each is folded, and what clicking a chevron does.
+    var foldRegions: [Int: NSRange] = [:] { didSet { needsDisplay = true } }
+    var isFolded: ((NSRange) -> Bool)?
+    var onToggleFold: ((NSRange) -> Void)?
+    private var hoveringGutter = false
+    private static let chevronWidth: CGFloat = 14
 
     init(textView: LaTeXTextView) {
         self.textView = textView
@@ -53,7 +59,7 @@ final class LineNumberRuler: NSRulerView {
     private func updateThickness() {
         rebuildLineStarts()
         let digits = max(3, String(lineStarts.count).count)
-        let w = CGFloat(digits) * 8 + 26
+        let w = CGFloat(digits) * 8 + 26 + Self.chevronWidth
         if abs(ruleThickness - w) > 0.5 {
             ruleThickness = w
             onThicknessChange?(w)
@@ -98,6 +104,12 @@ final class LineNumberRuler: NSRulerView {
         while lineNo <= lineStarts.count {
             let charIndex = lineStarts[lineNo - 1]
             if charIndex > NSMaxRange(chars) { break }
+            // Lines inside a fold have no place of their own.
+            if charIndex < ns.length, let ts = tv.textStorage, ts.attribute(Highlighter.widgetKey, at: charIndex, effectiveRange: nil) != nil,
+               ts.attribute(Highlighter.anchorKey, at: charIndex, effectiveRange: nil) == nil {
+                lineNo += 1
+                continue
+            }
             var fragRect: NSRect
             if charIndex < ns.length {
                 fragRect = lm.lineFragmentRect(forGlyphAt: lm.glyphIndexForCharacter(at: charIndex), effectiveRange: nil)
@@ -121,7 +133,18 @@ final class LineNumberRuler: NSRulerView {
             ])
             let size = label.size()
             let baselineOffset = max(0, (lineHeight * spacing - size.height) / 2)
-            label.draw(at: NSPoint(x: bounds.width - size.width - 12, y: y + baselineOffset))
+            label.draw(at: NSPoint(x: bounds.width - size.width - 12 - Self.chevronWidth, y: y + baselineOffset))
+            if let region = foldRegions[lineNo] {
+                let folded = isFolded?(region) ?? false
+                if folded || hoveringGutter {
+                    let name = folded ? "chevron.right" : "chevron.down"
+                    if let img = NSImage(systemSymbolName: name, accessibilityDescription: folded ? "Unfold" : "Fold")?.withSymbolConfiguration(.init(pointSize: fontSize - 2.5, weight: .bold)) {
+                        let tinted = VisualMath.tint(img, folded ? accent : (lineNo == hoverLine ? t.text.withAlphaComponent(0.8) : t.gutterText))
+                        let r = NSRect(x: bounds.width - Self.chevronWidth - 2 + (Self.chevronWidth - img.size.width) / 2, y: y + (lineHeight * spacing - img.size.height) / 2, width: img.size.width, height: img.size.height)
+                        tinted.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+                    }
+                }
+            }
 
             if let sev = issueLines[lineNo] {
                 let color = sev == .error ? t.error : (sev == .warning ? t.warning : t.secondary)
@@ -163,10 +186,17 @@ final class LineNumberRuler: NSRulerView {
         }
     }
 
-    override func mouseExited(with event: NSEvent) { hoverLine = nil; needsDisplay = true }
+    override func mouseEntered(with event: NSEvent) { hoveringGutter = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hoverLine = nil; hoveringGutter = false; needsDisplay = true }
 
     override func mouseDown(with event: NSEvent) {
         guard let tv = textView, let l = lineAt(event), l - 1 < lineStarts.count else { return }
+        // The chevron column folds and unfolds.
+        let x = convert(event.locationInWindow, from: nil).x
+        if x > bounds.width - Self.chevronWidth - 4, let region = foldRegions[l] {
+            onToggleFold?(region)
+            return
+        }
         let start = lineStarts[l - 1]
         let end = l < lineStarts.count ? lineStarts[l] : (tv.string as NSString).length
         tv.window?.makeFirstResponder(tv)

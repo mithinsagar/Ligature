@@ -8,18 +8,21 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             SlidingTabs(items: SidebarTab.allCases, selection: $model.sidebarTab, symbol: \.symbol, title: \.title,
-                        badge: { $0 == .issues ? model.errorCount : 0 })
+                        badge: { $0 == .issues ? model.errorCount : ($0 == .review ? model.openCommentCount : 0) })
                 .padding(.horizontal, 10)
                 .padding(.top, 6)
                 .padding(.bottom, 6)
             Group {
                 switch model.sidebarTab {
                 case .files: FilesPanel(model: model)
+                case .search: SearchPanel(model: model)
                 case .outline: OutlinePanel(model: model)
                 case .issues: IssuesPanel(model: model)
+                case .review: ReviewPanel(model: model)
                 case .symbols: SymbolsPanel(model: model)
                 case .citations: CitationsPanel(model: model)
                 case .history: HistoryPanel(model: model)
+                case .git: GitPanel(model: model)
                 }
             }
             .transition(.opacity)
@@ -244,19 +247,20 @@ struct IssuesPanel: View {
     @State private var filter: CompileIssue.Severity? = nil
     @State private var expanded: String?
 
-    var shown: [CompileIssue] { model.issues.filter { filter == nil || $0.severity == filter } }
+    var all: [CompileIssue] { model.allIssues }
+    var shown: [CompileIssue] { all.filter { filter == nil || $0.severity == filter } }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 6) {
-                chip("All", count: model.issues.count, value: nil, color: Color(theme.secondary))
-                chip("Errors", count: model.errorCount, value: .error, color: Color(theme.error))
-                chip("Warnings", count: model.issues.filter { $0.severity == .warning }.count, value: .warning, color: Color(theme.warning))
-                chip("Layout", count: model.issues.filter { $0.severity == .badBox }.count, value: .badBox, color: Color(theme.secondary))
+                chip("All", count: all.count, value: nil, color: Color(theme.secondary))
+                chip("Errors", count: all.filter { $0.severity == .error }.count, value: .error, color: Color(theme.error))
+                chip("Warnings", count: all.filter { $0.severity == .warning }.count, value: .warning, color: Color(theme.warning))
+                chip("Layout", count: all.filter { $0.severity == .badBox }.count, value: .badBox, color: Color(theme.secondary))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 4)
-            if model.issues.isEmpty {
+            if all.isEmpty {
                 if model.compileState == .success {
                     EmptyState(symbol: "checkmark.seal", title: "Clean compile", message: "No errors or warnings. Nice.")
                 } else {
@@ -319,9 +323,19 @@ private struct IssueRow: View {
                         .lineLimit(expanded ? nil : 2)
                         .fixedSize(horizontal: false, vertical: true)
                     if let file = issue.file ?? (issue.line != nil ? model.mainFile : nil) {
-                        Text("\((file as NSString).lastPathComponent)\(issue.line.map { ":\($0)" } ?? "")")
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundStyle(Color(theme.secondary))
+                        HStack(spacing: 6) {
+                            Text("\((file as NSString).lastPathComponent)\(issue.line.map { ":\($0)" } ?? "")")
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundStyle(Color(theme.secondary))
+                            if issue.isLive {
+                                Text("As you type")
+                                    .font(.system(size: 9.5, weight: .semibold))
+                                    .foregroundStyle(accent)
+                                    .padding(.horizontal, 5).padding(.vertical, 1)
+                                    .background(Capsule().fill(accent.opacity(0.12)))
+                                    .help("Found while you type, without compiling")
+                            }
+                        }
                     }
                 }
                 Spacer(minLength: 0)
@@ -336,6 +350,11 @@ private struct IssueRow: View {
                         Text(ctx).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Color(theme.text).opacity(0.8))
                             .padding(6).frame(maxWidth: .infinity, alignment: .leading)
                             .background(RoundedRectangle(cornerRadius: 5).fill(Color(theme.text).opacity(0.04)))
+                    }
+                    if issue.severity == .error, issue.line != nil {
+                        Button { model.suggestFix(for: issue) } label: { Label("Suggest Fix", systemImage: "sparkles") }
+                            .buttonStyle(.ligSecondary)
+                            .help("Ask Apple Intelligence on this Mac for a fix (nothing leaves your computer)")
                     }
                     if let fix = advice?.fix, let label = advice?.fixLabel {
                         Button { model.apply(fix) } label: { Label(label, systemImage: "wand.and.sparkles") }
@@ -549,24 +568,41 @@ private struct CitationRow: View {
 struct HistoryPanel: View {
     @Bindable var model: ProjectModel
     @State private var selected: Snapshot?
-    @State private var compilesOnly = true
+    @State private var filter: Filter = .compiles
     @State private var confirmRestore: Snapshot?
+    @State private var labelling: Snapshot?
+    @State private var labellingNow = false
+    @State private var labelText = ""
 
-    var shown: [Snapshot] { compilesOnly ? model.snapshots.filter(\.isCompile) : model.snapshots }
+    enum Filter { case compiles, all, labels }
+    var compilesOnly: Bool { filter == .compiles }
+
+    var shown: [Snapshot] {
+        switch filter {
+        case .compiles: model.snapshots.filter(\.isCompile)
+        case .all: model.snapshots
+        case .labels: model.snapshots.filter { !($0.note ?? "").isEmpty }
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 6) {
-                Button("Compiles") { withAnimation(.panel) { compilesOnly = true } }.buttonStyle(.ligChip(selected: compilesOnly))
-                Button("All versions") { withAnimation(.panel) { compilesOnly = false } }.buttonStyle(.ligChip(selected: !compilesOnly))
+                Button("Compiles") { withAnimation(.panel) { filter = .compiles } }.buttonStyle(.ligChip(selected: filter == .compiles))
+                Button("All") { withAnimation(.panel) { filter = .all } }.buttonStyle(.ligChip(selected: filter == .all))
+                Button { withAnimation(.panel) { filter = .labels } } label: { Label("Labels", systemImage: "bookmark").fixedSize() }.buttonStyle(.ligChip(selected: filter == .labels))
                 Spacer()
+                Button { labelText = ""; labellingNow = true } label: { Image(systemName: "bookmark.circle") }
+                    .buttonStyle(.ligIcon(size: 24))
+                    .help("Label the current version")
             }
             .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 4)
             if shown.isEmpty {
-                EmptyState(symbol: compilesOnly ? "play.circle" : "clock.arrow.circlepath",
-                           title: compilesOnly ? "No compiles yet" : "No versions yet",
-                           message: compilesOnly ? "Each time you press Compile, the PDF and your sources are kept here so you can go back to them."
-                                                 : "A version is saved after each successful compile that changed something.")
+                EmptyState(symbol: filter == .labels ? "bookmark" : (compilesOnly ? "play.circle" : "clock.arrow.circlepath"),
+                           title: filter == .labels ? "No labels yet" : (compilesOnly ? "No compiles yet" : "No versions yet"),
+                           message: filter == .labels ? "Name a version (for example “Sent to supervisor”) with the bookmark button or a row's menu."
+                                    : (compilesOnly ? "Each time you press Compile, the PDF and your sources are kept here so you can go back to them."
+                                                    : "A version is saved after each successful compile that changed something."))
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2, pinnedViews: [.sectionHeaders]) {
@@ -576,7 +612,16 @@ struct HistoryPanel: View {
                                     HistoryRow(snap: s, previous: previous(of: s), root: model.root,
                                                open: { selected = s },
                                                viewPDF: { if let u = HistoryStore.pdfURL(s, root: model.root) { NSWorkspace.shared.open(u) } },
-                                               restore: { confirmRestore = s })
+                                               restore: { confirmRestore = s },
+                                               label: { labelText = s.note ?? ""; labelling = s })
+                                        .contextMenu {
+                                            Button(s.note == nil ? "Label This Version…" : "Rename Label…") { labelText = s.note ?? ""; labelling = s }
+                                            if s.note != nil { Button("Remove Label") { model.label(s, as: nil) } }
+                                            Button("Download This Version…") { model.downloadVersion(s) }
+                                            if s.isCompile { Button("Open PDF") { if let u = HistoryStore.pdfURL(s, root: model.root) { NSWorkspace.shared.open(u) } } }
+                                            Divider()
+                                            Button("Go Back to This Version…") { confirmRestore = s }
+                                        }
                                 }
                             } header: {
                                 Text(day).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Color(theme.secondary))
@@ -591,6 +636,16 @@ struct HistoryPanel: View {
             }
         }
         .sheet(item: $selected) { snap in HistoryDiffSheet(model: model, snapshot: snap) }
+        .alert("Label this version", isPresented: Binding(get: { labelling != nil }, set: { if !$0 { labelling = nil } }), presenting: labelling) { snap in
+            TextField("e.g. Sent to supervisor", text: $labelText)
+            Button("Save") { model.label(snap, as: labelText) }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in Text("Labelled versions are easy to find and are never cleaned up.") }
+        .alert("Label the current version", isPresented: $labellingNow) {
+            TextField("e.g. Submitted draft", text: $labelText)
+            Button("Save") { if !labelText.isEmpty { model.labelCurrentVersion(labelText) } }
+            Button("Cancel", role: .cancel) {}
+        } message: { Text("Saves the project as it is now under this name.") }
         .alert("Go back to this version?", isPresented: Binding(get: { confirmRestore != nil }, set: { if !$0 { confirmRestore = nil } }), presenting: confirmRestore) { snap in
             Button("Restore") { model.restoreProject(to: snap) }
             Button("Cancel", role: .cancel) {}
@@ -625,6 +680,7 @@ private struct HistoryRow: View {
     let open: () -> Void
     let viewPDF: () -> Void
     let restore: () -> Void
+    var label: () -> Void = {}
     @State private var hovering = false
     @State private var thumb: NSImage?
 
@@ -641,6 +697,12 @@ private struct HistoryRow: View {
                 Circle().fill(accent.opacity(0.7)).frame(width: 6, height: 6).frame(width: 26)
             }
             VStack(alignment: .leading, spacing: 2) {
+                if let note = snap.note, !note.isEmpty {
+                    Label(note, systemImage: "bookmark.fill")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(accent)
+                        .lineLimit(1)
+                }
                 HStack(spacing: 6) {
                     Text(snap.date, style: .time).font(.system(size: 12, weight: .medium).monospacedDigit()).foregroundStyle(Color(theme.text))
                     if let e = snap.errors, e > 0 {
@@ -660,6 +722,7 @@ private struct HistoryRow: View {
             Spacer(minLength: 2)
             if hovering {
                 HStack(spacing: 0) {
+                    IconButton(symbol: snap.note == nil ? "bookmark" : "bookmark.fill", help: snap.note == nil ? "Label this version" : "Rename label", size: 22, action: label)
                     if snap.isCompile { IconButton(symbol: "eye", help: "Open this PDF", size: 22, action: viewPDF) }
                     IconButton(symbol: "arrow.uturn.backward", help: "Go back to this version", size: 22, action: restore)
                 }
@@ -687,7 +750,21 @@ struct HistoryDiffSheet: View {
     @State private var file = ""
     @Environment(\.dismiss) private var dismiss
 
-    var files: [String] { snapshot.files.keys.sorted { a, b in a == model.mainFile ? true : (b == model.mainFile ? false : a < b) } }
+    /// Files in that version, plus files added since (so the picker shows what changed either way).
+    var files: [String] {
+        let now = FileNode.flatten(model.tree).filter { n in !n.isDirectory && ["tex", "bib", "sty", "cls", "ltx"].contains((n.name as NSString).pathExtension.lowercased()) }.map(\.path)
+        return Set(snapshot.files.keys).union(now).sorted { a, b in a == model.mainFile ? true : (b == model.mainFile ? false : a < b) }
+    }
+
+    func change(_ f: String) -> String {
+        let then = snapshot.files[f], current = model.text(of: f)
+        switch (then, current) {
+        case (nil, _?): return "  ·  added since"
+        case (_?, nil): return "  ·  deleted since"
+        case let (a?, b?): return a == b ? "  ·  unchanged" : "  ·  edited"
+        default: return ""
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -697,7 +774,7 @@ struct HistoryDiffSheet: View {
                     Text("Red lines are only in this version; green lines are only in the current file.").font(.system(size: 11)).foregroundStyle(Color(theme.secondary))
                 }
                 Spacer()
-                Picker("", selection: $file) { ForEach(files, id: \.self) { Text($0).tag($0) } }.frame(width: 220)
+                Picker("", selection: $file) { ForEach(files, id: \.self) { Text($0 + change($0)).tag($0) } }.frame(width: 260)
             }
             .padding(16)
             Divider()

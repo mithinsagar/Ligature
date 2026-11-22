@@ -195,11 +195,70 @@ private struct EditorPage: View {
             Toggle("Check spelling in prose (not in commands or math)", isOn: $prefs.spellCheck).toggleStyle(.lig)
             Toggle("Show line numbers", isOn: $prefs.lineNumbers).toggleStyle(.lig)
         }
+        SettingsGroup(title: "Keys and font", footnote: "Emacs-style keys (⌃A, ⌃E, ⌃K, ⌃Y…) work everywhere on macOS. OpenDyslexic is free from opendyslexic.org; once installed it appears in the list.") {
+            Picker("Keybindings", selection: $prefs.keybindings) {
+                Text("Standard").tag("standard")
+                Text("Vim").tag("vim")
+            }
+            Picker("Editor font", selection: $prefs.editorFontName) {
+                Text("System monospaced (SF Mono)").tag("")
+                ForEach(Typo.availableFamilies().filter { $0 != "SF Mono" }, id: \.self) { Text($0).tag($0) }
+            }
+            if !Typo.availableFamilies().contains(where: { $0.hasPrefix("OpenDyslexic") }) {
+                Button("Get OpenDyslexic (free font for dyslexic readers)…") { NSWorkspace.shared.open(URL(string: "https://opendyslexic.org")!) }
+                    .buttonStyle(.link)
+            }
+        }
+        SettingsGroup(title: "Spelling and grammar") {
+            Picker("Language", selection: $prefs.spellLanguage) {
+                Text("Detect automatically").tag("")
+                ForEach(NSSpellChecker.shared.availableLanguages, id: \.self) { code in
+                    Text(Locale.current.localizedString(forIdentifier: code) ?? code).tag(code)
+                }
+            }
+            Toggle("Check grammar in prose too", isOn: $prefs.grammarCheck).toggleStyle(.lig).disabled(!prefs.spellCheck)
+            PersonalDictionary()
+        }
         SettingsGroup(title: "Previews", footnote: "Equation previews are rendered by the TeX engine with your document's own packages and macros.") {
             Toggle("Live equation preview while the caret is in math", isOn: $prefs.mathPreview).toggleStyle(.lig)
             Toggle("Peek on hover: references, citations, images, symbols", isOn: $prefs.hoverPeeks).toggleStyle(.lig)
             Toggle("Show errors and warnings inline at the end of the line", isOn: $prefs.inlineIssues).toggleStyle(.lig)
         }
+    }
+}
+
+/// Words added with "Learn Spelling", with a way to forget them.
+private struct PersonalDictionary: View {
+    @State private var words: [String] = []
+    @State private var expanded = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            if words.isEmpty {
+                Text("No learned words yet. Right-click a word marked as misspelled and choose Learn Spelling.").font(.system(size: 11.5)).foregroundStyle(Color(theme.secondary))
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(words, id: \.self) { w in
+                            HStack {
+                                Text(w).font(.system(size: 12))
+                                Spacer()
+                                Button("Forget") { NSSpellChecker.shared.unlearnWord(w); load() }.buttonStyle(.ligGhost)
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 160)
+            }
+        } label: {
+            Text("Personal dictionary (\(words.count) word\(words.count == 1 ? "" : "s"))").font(.system(size: 12.5))
+        }
+        .onAppear(perform: load)
+    }
+
+    private func load() {
+        let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Spelling/LocalDictionary")
+        words = ((try? String(contentsOf: url, encoding: .utf8)) ?? "").components(separatedBy: .newlines).filter { !$0.isEmpty && NSSpellChecker.shared.hasLearnedWord($0) }.sorted()
     }
 }
 

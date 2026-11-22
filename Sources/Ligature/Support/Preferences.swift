@@ -30,7 +30,9 @@ final class Preferences {
         var title: String { self == .tectonic ? "Tectonic (XeTeX)" : "latexmk (TeX Live)" }
     }
 
-    private let d = UserDefaults.standard
+    /// Scripted test runs keep their settings in a separate domain so they never change the user's.
+    private let d: UserDefaults = ProcessInfo.processInfo.environment["LIGATURE_SCRIPT"] != nil
+        ? UserDefaults(suiteName: "local.ligature.Ligature.testrun") ?? .standard : .standard
 
     var themeID: String { didSet { d.set(themeID, forKey: "themeID") } }
     var accentID: String { didSet { d.set(accentID, forKey: "accentID") } }
@@ -53,13 +55,23 @@ final class Preferences {
     var reduceMotion: Bool { didSet { d.set(reduceMotion, forKey: "reduceMotion") } }
     /// Visual editing: the source shown as formatted prose with LaTeX markup hidden (like Overleaf's Visual mode).
     var visualMode: Bool { didSet { d.set(visualMode, forKey: "visualMode") } }
+    /// Compile options: stop at the first error instead of pushing through, and skip images for speed.
+    var stopOnFirstError: Bool { didSet { d.set(stopOnFirstError, forKey: "stopOnFirstError") } }
+    var draftMode: Bool { didSet { d.set(draftMode, forKey: "draftMode") } }
+    /// "standard" or "vim".
+    var keybindings: String { didSet { d.set(keybindings, forKey: "keybindings") } }
+    /// Editor font family ("" = the system monospaced font).
+    var editorFontName: String { didSet { d.set(editorFontName, forKey: "editorFontName"); Typo.fontName = editorFontName } }
+    /// Spell-check language ("" = detect automatically) and grammar checking.
+    var spellLanguage: String { didSet { d.set(spellLanguage, forKey: "spellLanguage") } }
+    var grammarCheck: Bool { didSet { d.set(grammarCheck, forKey: "grammarCheck") } }
 
     private init() {
         d.register(defaults: [
             "themeID": "auto", "accentID": "ink", "editorFontSize": 13.5, "lineSpacing": 1.45, "liveCompile": false,
             "compileDelay": 0.12, "hapticsEnabled": true, "spellCheck": true, "autoPair": true,
             "wrapLines": true, "inlineIssues": true, "lineNumbers": true, "mathPreview": true, "hoverPeeks": true,
-            "pdfDarkPaper": false, "followCaret": false, "engine": Engine.tectonic.rawValue, "enginePath": "", "reduceMotion": false, "visualMode": false,
+            "pdfDarkPaper": false, "followCaret": false, "engine": Engine.tectonic.rawValue, "enginePath": "", "reduceMotion": false, "visualMode": false, "stopOnFirstError": false, "draftMode": false, "keybindings": "standard", "editorFontName": "", "spellLanguage": "", "grammarCheck": false,
         ])
         themeID = d.string(forKey: "themeID")!
         accentID = d.string(forKey: "accentID")!
@@ -81,5 +93,12 @@ final class Preferences {
         enginePath = d.string(forKey: "enginePath")!
         reduceMotion = d.bool(forKey: "reduceMotion")
         visualMode = d.bool(forKey: "visualMode")
+        stopOnFirstError = d.bool(forKey: "stopOnFirstError")
+        draftMode = d.bool(forKey: "draftMode")
+        keybindings = d.string(forKey: "keybindings") ?? "standard"
+        editorFontName = d.string(forKey: "editorFontName") ?? ""
+        spellLanguage = d.string(forKey: "spellLanguage") ?? ""
+        grammarCheck = d.bool(forKey: "grammarCheck")
+        Typo.fontName = editorFontName
     }
 }

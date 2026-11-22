@@ -15,9 +15,15 @@ public struct CompileIssue: Identifiable, Hashable, Sendable {
     public var message: String
     /// The source snippet TeX showed after "l.<n>", used to find the offending command.
     public var context: String?
+    /// 1-based column and length of the offending text, when known (the live checker knows; TeX doesn't).
+    public var column: Int?
+    public var length: Int?
+    /// Found by the as-you-type checker rather than a compile.
+    public var isLive = false
 
-    public init(severity: Severity, file: String?, line: Int?, message: String, context: String? = nil) {
+    public init(severity: Severity, file: String?, line: Int?, message: String, context: String? = nil, column: Int? = nil, length: Int? = nil, isLive: Bool = false) {
         self.severity = severity; self.file = file; self.line = line; self.message = message; self.context = context
+        self.column = column; self.length = length; self.isLive = isLive
     }
 }
 
@@ -121,15 +127,17 @@ public enum LogParser {
     }
 
     /// "path/file.tex:12: message" → parts. Paths may contain spaces but not ':' followed by digits.
+    /// Tectonic names files as they were \input, so "sections/results:12:" means sections/results.tex.
     static func fileLineMessage(_ s: String) -> (file: String, line: Int, message: String)? {
-        let re = try! NSRegularExpression(pattern: #"^(.+?\.(?:tex|sty|cls|bib|ltx|dtx|bbl|aux)):(\d+):\s*(.*)$"#)
+        let re = try! NSRegularExpression(pattern: #"^([^:]+?(\.(?:tex|sty|cls|bib|ltx|dtx|bbl|aux))?):(\d+):\s*(.*)$"#)
         let ns = s as NSString
         guard let m = re.firstMatch(in: s, range: NSRange(location: 0, length: ns.length)),
-              let n = Int(ns.substring(with: m.range(at: 2))) else { return nil }
-        let message = ns.substring(with: m.range(at: 3)).trimmingCharacters(in: .whitespaces)
+              let n = Int(ns.substring(with: m.range(at: 3))) else { return nil }
+        let message = ns.substring(with: m.range(at: 4)).trimmingCharacters(in: .whitespaces)
         // XeTeX font-loading chatter and empty continuation lines are not problems.
         if message.isEmpty || message.hasPrefix("Requested font") || message.hasPrefix("-> ") { return nil }
-        return (ns.substring(with: m.range(at: 1)), n, message.hasSuffix(".") ? String(message.dropLast()) : message)
+        let file = ns.substring(with: m.range(at: 1)) + (m.range(at: 2).location == NSNotFound ? ".tex" : "")
+        return (file, n, message.hasSuffix(".") ? String(message.dropLast()) : message)
     }
 
     static func firstInt(after marker: String, in s: String) -> Int? {
